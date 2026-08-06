@@ -12,7 +12,7 @@ from pathlib import Path
 import argparse
 import math
 import re
-from typing import Deque, Optional
+from typing import Any, Deque, Optional
 
 from accuracy import compute_accuracy, rank_discrepancies, summarize_control_discrepancies
 from isa import FRF, IRF, Instruction
@@ -345,8 +345,11 @@ class Model:
         memory_issue_width: int = 1,
         control_issue_width: int = 1,
         dual_mem: bool = False,
+        memory_pairing: str = "none",
         lockstep_bundles: bool = True,
+        atomic_pair_retire: bool = True,
         allow_branch_branch: bool = False,
+        symmetric_slots: bool = False,
         intra_bundle_forwarding: bool = False,
         wrong_path_frontend: bool = False,
         stale_drop_fetch_penalty: int = 1,
@@ -354,6 +357,8 @@ class Model:
         self.params = dict(locals())
         if dual_policy not in ("single", "generic", "shakti"):
             raise ValueError("dual_policy must be 'single', 'generic', or 'shakti'")
+        if memory_pairing not in ("none", "store_involving", "all"):
+            raise ValueError("memory_pairing must be 'none', 'store_involving', or 'all'")
         self.q_s0s1 = FixedQueue(isb_s0s1)
         self.q_s1s2 = FixedQueue(isb_s1s2)
         self.q_s2s3 = FixedQueue(isb_s2s3)
@@ -385,8 +390,11 @@ class Model:
         self.memory_issue_width = memory_issue_width
         self.control_issue_width = control_issue_width
         self.dual_mem = dual_mem
+        self.memory_pairing = "store_involving" if dual_mem and memory_pairing == "none" else memory_pairing
         self.lockstep_bundles = lockstep_bundles
+        self.atomic_pair_retire = atomic_pair_retire
         self.allow_branch_branch = allow_branch_branch
+        self.symmetric_slots = symmetric_slots
         self.intra_bundle_forwarding = intra_bundle_forwarding
         self.wrong_path_frontend = wrong_path_frontend
         self.stale_drop_fetch_penalty = stale_drop_fetch_penalty
@@ -418,6 +426,8 @@ class Model:
         self.next_bundle_id = 0
         self.dual_pair_bundles = 0
         self.dual_single_bundles = 0
+        self.dual_one_instr_bundles = 0
+        self.stage3_stall_cycles = 0
         self.dual_pair_accept_counts: Counter[str] = Counter()
         self.dual_pair_reject_counts: Counter[str] = Counter()
         self.memory_issues_this_cycle = 0
@@ -467,8 +477,16 @@ class Model:
                 self.try_commit()
             for _ in range(self.stage4_width):
                 self.try_stage4()
+            stage3_before = len(self.q_s2s3)
             for _ in range(self.issue_width):
                 self.try_execute()
+            if (
+                self.dual_policy == "shakti"
+                and stage3_before > 0
+                and len(self.q_s2s3) == stage3_before
+                and not self.q_s2s3.first().stale_frontend
+            ):
+                self.stage3_stall_cycles += 1
             for _ in range(self.decode_width):
                 self.try_decode()
             for _ in range(self.fetch_decode_width):
@@ -477,6 +495,45 @@ class Model:
                 self.try_fetch(entries)
             self.cycle += 1
         return self.commits
+
+    def counter_profile(self, total_cycles: Optional[int] = None) -> dict[str, Any]:
+        cycles = total_cycles if total_cycles is not None else (self.commits[-1] - self.commits[0] + 1 if self.commits else 0)
+        raw_hazard = sum(count for name, count in self.dual_pair_reject_counts.items() if name.startswith("RAW:"))
+        mem_mem_hazard = self._counter_prefix(self.dual_pair_reject_counts, "MEMORY+MEMORY")
+        mem_mem_ll = self.dual_pair_reject_counts.get("MEMORY+MEMORY:LL", 0)
+        mem_mem_ls = self.dual_pair_reject_counts.get("MEMORY+MEMORY:LS", 0)
+        mem_mem_ss = self.dual_pair_reject_counts.get("MEMORY+MEMORY:SS", 0)
+        branch_branch_rejected = self.dual_pair_reject_counts.get("CONTROL+CONTROL", 0)
+        branch_branch_accepted = self.dual_pair_accept_counts.get("CONTROL+CONTROL", 0)
+        dual_issued = self.dual_pair_bundles
+        return {
+            "cycles": cycles,
+            "dual_issued": dual_issued,
+            "dual_issued_pct_cycles": dual_issued / cycles if cycles else 0.0,
+            "raw_hazard": raw_hazard,
+            "one_instr": self.dual_one_instr_bundles,
+            "st3_not_firing": self.stage3_stall_cycles,
+            "mem_mem_hazard": mem_mem_hazard,
+            "mem_mem_ll": mem_mem_ll,
+            "mem_mem_ls": mem_mem_ls,
+            "mem_mem_ss": mem_mem_ss,
+            "branch_branch_rejected": branch_branch_rejected,
+            "branch_branch_accepted": branch_branch_accepted,
+            "branch_branch_opportunities": branch_branch_rejected + branch_branch_accepted,
+            "mispredict": sum(1 for event in self.control_events if event.pred_mispredict),
+            "pair_bundles": self.dual_pair_bundles,
+            "single_bundles": self.dual_single_bundles,
+            "paired_instructions_pct": (2 * self.dual_pair_bundles)
+            / (2 * self.dual_pair_bundles + self.dual_single_bundles)
+            if self.dual_pair_bundles or self.dual_single_bundles
+            else 0.0,
+            "accepted_pair_classes": dict(self.dual_pair_accept_counts),
+            "rejected_pair_classes": dict(self.dual_pair_reject_counts),
+        }
+
+    @staticmethod
+    def _counter_prefix(counter: Counter[str], prefix: str) -> int:
+        return sum(count for name, count in counter.items() if name.startswith(prefix))
 
     def _begin_cycle(self) -> None:
         self.memory_issues_this_cycle = 0
@@ -506,6 +563,8 @@ class Model:
         self.next_bundle_id = 0
         self.dual_pair_bundles = 0
         self.dual_single_bundles = 0
+        self.dual_one_instr_bundles = 0
+        self.stage3_stall_cycles = 0
         self.dual_pair_accept_counts.clear()
         self.dual_pair_reject_counts.clear()
         self.memory_issues_this_cycle = 0
@@ -621,7 +680,7 @@ class Model:
         # s2->s3 is a one-entry vector FIFO. Even though the model stores
         # scalar trace entries internally, a new bundle can enter only when
         # the whole vector slot is free.
-        if not self.q_s2s3.empty():
+        if self.num_issue <= 2 and not self.q_s2s3.empty():
             return False
 
         first = self.q_s1s2.first()
@@ -634,6 +693,8 @@ class Model:
                     self.dual_pair_accept_counts[reason] += 1
                 else:
                     self.dual_pair_reject_counts[reason] += 1
+        else:
+            self.dual_one_instr_bundles += 1
 
         bundle_size = 2 if issue_two else 1
         if self.q_s2s3.space() < bundle_size:
@@ -803,6 +864,9 @@ class Model:
         if first.stale_frontend:
             self.q_s4s5.pop()
             return True
+        if not self.atomic_pair_retire:
+            self._commit_entry(self.q_s4s5.pop())
+            return True
 
         bundle = self._head_bundle(self.q_s4s5)
         if not bundle:
@@ -935,9 +999,20 @@ class Model:
         second_kind = self._shakti_pair_kind(second)
         pair_name = f"{first_kind}+{second_kind}"
         if self._has_intra_bundle_raw(first, second):
-            return False, f"RAW:{pair_name}"
+            if not self._allows_intra_bundle_raw(first, second, first_kind, second_kind):
+                return False, f"RAW:{pair_name}"
+            pair_name = f"RAW_FWD:{pair_name}"
         if first_kind in ("SYSTEM", "TRAP", "WFI", "OTHER") or second_kind in ("SYSTEM", "TRAP", "WFI", "OTHER"):
             return False, pair_name
+        if first_kind == "MEMORY" and second_kind == "MEMORY":
+            memory_name = self._memory_pair_name(first, second)
+            if self.memory_pairing == "all":
+                return True, memory_name
+            if self.memory_pairing == "store_involving":
+                return (first.is_store or second.is_store), memory_name
+            return False, memory_name
+        if self.symmetric_slots and self._symmetric_slots_can_pair(first_kind, second_kind):
+            return True, pair_name
         if first_kind == "ALU" and second_kind in ("ALU", "MULDIV", "FLOAT", "MEMORY", "CONTROL"):
             return True, pair_name
         if second_kind == "ALU" and first_kind in ("MULDIV", "FLOAT", "MEMORY", "CONTROL"):
@@ -946,13 +1021,44 @@ class Model:
             return True, pair_name
         if second_kind == "CONTROL" and first_kind in ("MULDIV", "FLOAT", "MEMORY"):
             return True, pair_name
-        if self.dual_mem and first_kind == "MEMORY" and second_kind == "MEMORY":
-            # The RTL's dual_mem block permits one load/store pair in either
-            # order. It is compiled out and unwired in the current branch.
-            return (first.is_store or second.is_store), pair_name
         if self.allow_branch_branch and first_kind == "CONTROL" and second_kind == "CONTROL":
             return True, pair_name
         return False, pair_name
+
+    def _allows_intra_bundle_raw(
+        self,
+        first: Instruction,
+        second: Instruction,
+        first_kind: str,
+        second_kind: str,
+    ) -> bool:
+        if not self.intra_bundle_forwarding:
+            return False
+        return first_kind == "ALU" and second_kind == "ALU" and first.writes_scoreboard
+
+    def _symmetric_slots_can_pair(self, first_kind: str, second_kind: str) -> bool:
+        if first_kind == "CONTROL" and second_kind == "CONTROL":
+            return self.allow_branch_branch
+        if first_kind == "MEMORY" and second_kind == "MEMORY":
+            return self.memory_pairing != "none"
+        if first_kind == second_kind and first_kind in ("MULDIV", "FLOAT"):
+            return False
+        return first_kind in ("ALU", "MULDIV", "FLOAT", "MEMORY", "CONTROL") and second_kind in (
+            "ALU",
+            "MULDIV",
+            "FLOAT",
+            "MEMORY",
+            "CONTROL",
+        )
+
+    def _memory_pair_name(self, first: Instruction, second: Instruction) -> str:
+        if first.is_load and second.is_load:
+            return "MEMORY+MEMORY:LL"
+        if first.is_store and second.is_store:
+            return "MEMORY+MEMORY:SS"
+        if (first.is_load and second.is_store) or (first.is_store and second.is_load):
+            return "MEMORY+MEMORY:LS"
+        return "MEMORY+MEMORY:OTHER"
 
     def _bundle_fu_ready(self, bundle: list[PipeEntry]) -> bool:
         memory_count = self.memory_issues_this_cycle
@@ -1162,15 +1268,27 @@ def main() -> int:
     parser.add_argument("--control-issue-width", type=int)
     parser.add_argument("--dual-mem", action="store_true", help="Allow the gated dual_mem memory pairing rule")
     parser.add_argument(
+        "--memory-pairing",
+        choices=("none", "store_involving", "all"),
+        default=None,
+        help="Experimental MEM+MEM pairing policy",
+    )
+    parser.add_argument(
         "--decouple-lockstep",
         action="store_true",
         help="Experimental: let paired slots leave execute/stage4 independently while keeping atomic pair commit",
+    )
+    parser.add_argument(
+        "--independent-retire",
+        action="store_true",
+        help="Experimental: allow stage5 to retire paired slots independently",
     )
     parser.add_argument(
         "--allow-branch-branch",
         action="store_true",
         help="Experimental: allow CONTROL+CONTROL decode pairing; use with --control-issue-width 2",
     )
+    parser.add_argument("--symmetric-slots", action="store_true", help="Experimental: relax slot-0-only scarce-FU pairing")
     parser.add_argument("--intra-bundle-forwarding", action="store_true")
     parser.add_argument("--isb-s0s1", type=int)
     parser.add_argument("--isb-s1s2", type=int)
@@ -1242,9 +1360,11 @@ def main() -> int:
             f"commit={model.commit_width} "
             f"mem_issue={model.memory_issue_width} "
             f"control_issue={model.control_issue_width} "
-            f"dual_mem={int(model.dual_mem)} "
+            f"memory_pairing={model.memory_pairing} "
             f"lockstep={int(model.lockstep_bundles)} "
+            f"atomic_retire={int(model.atomic_pair_retire)} "
             f"branch_branch={int(model.allow_branch_branch)} "
+            f"symmetric_slots={int(model.symmetric_slots)} "
             f"intra_bundle_forwarding={int(model.intra_bundle_forwarding)}"
         )
         if model.dual_pair_bundles or model.dual_single_bundles:
@@ -1261,6 +1381,21 @@ def main() -> int:
                 print("accepted_pair_classes: " + _format_counter(model.dual_pair_accept_counts, limit=8))
             if model.dual_pair_reject_counts:
                 print("rejected_pair_classes: " + _format_counter(model.dual_pair_reject_counts, limit=8))
+            profile = model.counter_profile()
+            print(
+                "counter_profile: "
+                f"dual_issued={profile['dual_issued']} "
+                f"dual_issued_pct_cycles={profile['dual_issued_pct_cycles']:.3%} "
+                f"raw_hazard={profile['raw_hazard']} "
+                f"one_instr={profile['one_instr']} "
+                f"st3_not_firing={profile['st3_not_firing']} "
+                f"mem_mem_hazard={profile['mem_mem_hazard']} "
+                f"mem_ll={profile['mem_mem_ll']} "
+                f"mem_ls={profile['mem_mem_ls']} "
+                f"mem_ss={profile['mem_mem_ss']} "
+                f"branch_branch={profile['branch_branch_opportunities']} "
+                f"mispredict={profile['mispredict']}"
+            )
     if window is not None:
         runs = f" runs={window.runs}" if window.runs is not None else ""
         print(
@@ -1328,8 +1463,13 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         "bsv_hash_truncate": args.bsv_hash_truncate,
         "enable_bpu": not args.no_bpu,
         "dual_mem": args.dual_mem,
+        "memory_pairing": args.memory_pairing
+        if args.memory_pairing is not None
+        else ("store_involving" if args.dual_mem else "none"),
         "lockstep_bundles": not args.decouple_lockstep,
+        "atomic_pair_retire": not args.independent_retire,
         "allow_branch_branch": args.allow_branch_branch,
+        "symmetric_slots": args.symmetric_slots,
         "intra_bundle_forwarding": args.intra_bundle_forwarding,
     }
     if args.dual_issue:
@@ -1351,8 +1491,14 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
                 "isb_s3s4": 16,
                 "isb_s4s5": 16,
                 "dual_mem": args.dual_mem,
+                "memory_pairing": args.memory_pairing
+                if args.memory_pairing is not None
+                else ("store_involving" if args.dual_mem else "none"),
                 "lockstep_bundles": not args.decouple_lockstep,
-                "intra_bundle_forwarding": False,
+                "atomic_pair_retire": not args.independent_retire,
+                "allow_branch_branch": args.allow_branch_branch,
+                "symmetric_slots": args.symmetric_slots,
+                "intra_bundle_forwarding": args.intra_bundle_forwarding,
             }
         )
     elif args.generic_dual_issue:

@@ -101,7 +101,7 @@ def test_dual_issue_dependent_alu_waits_without_intra_bundle_forwarding():
     assert cycles == [5, 6, 6]
 
 
-def test_shakti_dual_issue_has_no_intra_bundle_forwarding_override():
+def test_shakti_dual_issue_blocks_intra_bundle_raw_by_default():
     entries = annotate(
         [
             entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
@@ -110,9 +110,21 @@ def test_shakti_dual_issue_has_no_intra_bundle_forwarding_override():
         ]
     )
 
-    cycles = dual_model(intra_bundle_forwarding=True).run(entries)
+    cycles = dual_model().run(entries)
 
     assert cycles == [5, 6, 6]
+
+
+def test_intra_bundle_forwarding_experiment_allows_alu_to_alu_raw_pair():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
+            entry(1, 0x1004, 0x00108113),  # addi x2, x1, 1
+            entry(2, 0x1008, 0x00300193),  # addi x3, x0, 3
+        ]
+    )
+
+    assert dual_model(intra_bundle_forwarding=True).run(entries) == [5, 5, 6]
 
 
 def test_shakti_dual_issue_memory_pairs_are_disabled_without_dual_mem():
