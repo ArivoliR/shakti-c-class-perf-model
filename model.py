@@ -16,7 +16,14 @@ from typing import Deque, Optional
 
 from accuracy import compute_accuracy, rank_discrepancies
 from isa import FRF, IRF, Instruction
-from trace import BenchmarkWindow, TraceEntry, detect_benchmark_window, has_cycle_stamps, parse_app_log_metrics, parse_trace
+from trace import (
+    BenchmarkWindow,
+    TraceEntry,
+    detect_benchmark_window,
+    has_cycle_stamps,
+    parse_app_log_metrics,
+    parse_trace_files,
+)
 
 
 def parse_makefile_defines(path: str | Path) -> dict[str, int | bool | str]:
@@ -40,12 +47,15 @@ def parse_makefile_defines(path: str | Path) -> dict[str, int | bool | str]:
 @dataclass(slots=True)
 class PipeEntry:
     trace: TraceEntry
+    prev_trace: Optional[TraceEntry] = None
+    next_trace: Optional[TraceEntry] = None
     predicted_next_pc: Optional[int] = None
     pred_state: int = 1
     pred_btb_hit: bool = False
     pred_history: int = 0
     pred_ci: str = "Branch"
     pred_mispredict: bool = False
+    frontend_waited_cycles: int = 0
     scoreboard_id: Optional[int] = None
     result_ready_cycle: int = 0
     bypassable: bool = False
@@ -257,10 +267,11 @@ class Model:
         wawid: int = 4,
         mul_latency: int = 2,
         div_latency: int = 32,
-        load_hit_latency: int = 2,
-        store_hit_latency: int = 2,
+        load_hit_latency: int = 1,
+        store_hit_latency: int = 1,
         csr_latency: int = 1,
-        branch_mispredict_penalty: int = 4,
+        branch_mispredict_penalty: int = 2,
+        upper_half_32b_target_penalty: int = 1,
         wb_flush_penalty: int = 4,
         btbdepth: int = 32,
         bhtdepth: int = 512,
@@ -286,7 +297,9 @@ class Model:
         self.store_hit_latency = store_hit_latency
         self.csr_latency = csr_latency
         self.branch_mispredict_penalty = branch_mispredict_penalty
+        self.upper_half_32b_target_penalty = upper_half_32b_target_penalty
         self.wb_flush_penalty = wb_flush_penalty
+        self.compressed = compressed
         self.issue_width = issue_width
         self.commit_width = commit_width
         self.predictor = BranchPredictor(
@@ -409,6 +422,10 @@ class Model:
             return False
         if not self._operands_available(insn):
             return False
+        frontend_penalty = self._frontend_redirect_penalty(entry)
+        if entry.frontend_waited_cycles < frontend_penalty:
+            entry.frontend_waited_cycles += 1
+            return False
 
         entry = self.q_s2s3.pop()
         self._lock_scoreboard(entry)
@@ -453,7 +470,11 @@ class Model:
             return False
 
         trace_entry = entries[self.fetch_index]
-        pipe_entry = PipeEntry(trace_entry)
+        pipe_entry = PipeEntry(
+            trace_entry,
+            prev_trace=entries[self.fetch_index - 1] if self.fetch_index > 0 else None,
+            next_trace=entries[self.fetch_index + 1] if self.fetch_index + 1 < len(entries) else None,
+        )
         if trace_entry.insn.is_control:
             (
                 pipe_entry.predicted_next_pc,
@@ -500,6 +521,28 @@ class Model:
                 return True
         return False
 
+    def _frontend_redirect_penalty(self, entry: PipeEntry) -> int:
+        if not self.compressed or self.upper_half_32b_target_penalty <= 0:
+            return 0
+        if not entry.insn.is_control or entry.pred_mispredict or not entry.pred_btb_hit:
+            return 0
+        actual_next = entry.trace.actual_next_pc
+        if actual_next is None or actual_next == entry.insn.fallthrough_pc:
+            return 0
+        if actual_next & 0x2 == 0:
+            return 0
+        if entry.next_trace is None or entry.next_trace.pc != actual_next or entry.next_trace.insn.length != 4:
+            return 0
+        if self._previous_load_feeds(entry):
+            return 0
+        return self.upper_half_32b_target_penalty
+
+    def _previous_load_feeds(self, entry: PipeEntry) -> bool:
+        prev = entry.prev_trace
+        if prev is None or not prev.insn.is_load or not prev.insn.writes_scoreboard:
+            return False
+        return (prev.insn.rd_type, prev.insn.rd) in entry.insn.source_regs()
+
     def _lock_scoreboard(self, entry: PipeEntry) -> None:
         key = entry.rd_key
         if key is None:
@@ -545,18 +588,19 @@ class Model:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the SHAKTI C-Class performance model")
-    parser.add_argument("trace_file", help="RTL rtldump file, optionally cycle-stamped")
+    parser.add_argument("trace_files", nargs="+", help="RTL rtldump file(s), optionally cycle-stamped")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--limit", type=int, default=None, help="Only parse the first N committed instructions")
     parser.add_argument("--no-auto-window", action="store_true", help="Use the whole parsed trace instead of the app_log IPC window")
     parser.add_argument("--window", metavar="START:END", help="Use an explicit 0-based trace index window, END exclusive")
-    parser.add_argument("--mispredict-penalty", type=int, default=4)
-    parser.add_argument("--load-hit-latency", type=int, default=2)
-    parser.add_argument("--store-hit-latency", type=int, default=2)
+    parser.add_argument("--mispredict-penalty", type=int, default=2)
+    parser.add_argument("--load-hit-latency", type=int, default=1)
+    parser.add_argument("--store-hit-latency", type=int, default=1)
+    parser.add_argument("--upper-half-32b-target-penalty", type=int, default=1)
     parser.add_argument("--show-discrepancies", type=int, default=12)
     args = parser.parse_args()
 
-    parsed_entries = parse_trace(args.trace_file, limit=args.limit)
+    parsed_entries = parse_trace_files(args.trace_files, limit=args.limit)
     entries = parsed_entries
     window: Optional[BenchmarkWindow] = None
     if args.window:
@@ -566,7 +610,7 @@ def main() -> int:
             parser.error(str(exc))
         entries = parsed_entries[start:end]
     elif not args.no_auto_window and args.limit is None:
-        metrics = parse_app_log_metrics(Path(args.trace_file).with_name("app_log"))
+        metrics = parse_app_log_metrics(Path(args.trace_files[0]).with_name("app_log"))
         if metrics is not None:
             window = detect_benchmark_window(parsed_entries, metrics)
             if window is not None:
@@ -577,6 +621,7 @@ def main() -> int:
         branch_mispredict_penalty=args.mispredict_penalty,
         load_hit_latency=args.load_hit_latency,
         store_hit_latency=args.store_hit_latency,
+        upper_half_32b_target_penalty=args.upper_half_32b_target_penalty,
     )
     cycles = model.run(entries)
     result = compute_accuracy(entries, cycles)
@@ -589,7 +634,7 @@ def main() -> int:
             "window: app_log "
             f"indices=[{window.start_index}:{window.end_index}) "
             f"mcycle={window.measured_cycles} "
-            f"minstret={window.measured_instructions}{runs}"
+            f"instructions={window.measured_instructions}{runs}"
         )
     elif args.window:
         print(f"window: explicit {args.window}")

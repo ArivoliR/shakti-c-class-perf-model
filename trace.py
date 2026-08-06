@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from isa import Instruction, decode
 
@@ -25,6 +25,8 @@ APP_LOG_RE = re.compile(
     r"instret:\s+(?P<instret>\d+)"
     r"(?:\s+runs:\s+(?P<runs>\d+))?"
 )
+COREMARK_TICKS_RE = re.compile(r"Total ticks\s+:\s+(?P<cycles>\d+)")
+COREMARK_ITERATIONS_RE = re.compile(r"Iterations\s+:\s+(?P<runs>\d+)")
 CSR_MCYCLE = 0xB00
 CSR_MINSTRET = 0xB02
 
@@ -64,7 +66,7 @@ class TraceEntry:
 @dataclass(frozen=True, slots=True)
 class AppLogMetrics:
     cycles: int
-    instret: int
+    instret: Optional[int] = None
     runs: Optional[int] = None
 
 
@@ -74,8 +76,8 @@ class BenchmarkWindow:
     end_index: int
     start_mcycle_index: int
     end_mcycle_index: int
-    start_minstret_index: int
-    end_minstret_index: int
+    start_minstret_index: Optional[int]
+    end_minstret_index: Optional[int]
     measured_cycles: int
     measured_instructions: int
     runs: Optional[int] = None
@@ -121,8 +123,23 @@ def parse_trace_lines(lines: Iterable[str], limit: Optional[int] = None) -> list
 
 
 def parse_trace(path: str | Path, limit: Optional[int] = None) -> list[TraceEntry]:
-    with Path(path).open("r", encoding="utf-8", errors="replace") as handle:
-        return parse_trace_lines(handle, limit=limit)
+    return parse_trace_files([path], limit=limit)
+
+
+def parse_trace_files(paths: Sequence[str | Path], limit: Optional[int] = None) -> list[TraceEntry]:
+    entries: list[TraceEntry] = []
+    for path in paths:
+        with Path(path).open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                entry = parse_line(line, len(entries))
+                if entry is None:
+                    continue
+                entries.append(entry)
+                if limit is not None and len(entries) >= limit:
+                    _annotate_next_pcs(entries)
+                    return entries
+    _annotate_next_pcs(entries)
+    return entries
 
 
 def has_cycle_stamps(entries: list[TraceEntry]) -> bool:
@@ -133,9 +150,17 @@ def parse_app_log_metrics(path: str | Path) -> Optional[AppLogMetrics]:
     app_log = Path(path)
     if not app_log.exists():
         return None
-    match = APP_LOG_RE.search(app_log.read_text(encoding="utf-8", errors="replace"))
+    text = app_log.read_text(encoding="utf-8", errors="replace")
+    match = APP_LOG_RE.search(text)
     if not match:
-        return None
+        ticks = COREMARK_TICKS_RE.search(text)
+        if not ticks:
+            return None
+        iterations = COREMARK_ITERATIONS_RE.search(text)
+        return AppLogMetrics(
+            cycles=int(ticks.group("cycles")),
+            runs=int(iterations.group("runs")) if iterations is not None else None,
+        )
     return AppLogMetrics(
         cycles=int(match.group("cycles")),
         instret=int(match.group("instret")),
@@ -153,6 +178,9 @@ def detect_benchmark_window(entries: list[TraceEntry], metrics: AppLogMetrics) -
         mcycle_by_value.setdefault(item[1], []).append(item)
     for item in minstrets:
         minstret_by_value.setdefault(item[1], []).append(item)
+
+    if metrics.instret is None:
+        return _detect_mcycle_only_window(mcycles, mcycle_by_value, metrics)
 
     best: tuple[int, BenchmarkWindow] | None = None
     for start_min_idx, start_min_value in minstrets:
@@ -184,6 +212,33 @@ def detect_benchmark_window(entries: list[TraceEntry], metrics: AppLogMetrics) -
                     if best is None or csr_gap_score < best[0]:
                         best = (csr_gap_score, window)
     return best[1] if best is not None else None
+
+
+def _detect_mcycle_only_window(
+    mcycles: list[tuple[int, int]],
+    mcycle_by_value: dict[int, list[tuple[int, int]]],
+    metrics: AppLogMetrics,
+) -> Optional[BenchmarkWindow]:
+    best: BenchmarkWindow | None = None
+    for start_cycle_idx, start_cycle_value in mcycles:
+        end_cycle_value = start_cycle_value + metrics.cycles
+        for end_cycle_idx, _ in mcycle_by_value.get(end_cycle_value, []):
+            if end_cycle_idx <= start_cycle_idx:
+                continue
+            candidate = BenchmarkWindow(
+                start_index=start_cycle_idx,
+                end_index=end_cycle_idx + 1,
+                start_mcycle_index=start_cycle_idx,
+                end_mcycle_index=end_cycle_idx,
+                start_minstret_index=None,
+                end_minstret_index=None,
+                measured_cycles=metrics.cycles,
+                measured_instructions=end_cycle_idx - start_cycle_idx + 1,
+                runs=metrics.runs,
+            )
+            if best is None or candidate.measured_instructions > best.measured_instructions:
+                best = candidate
+    return best
 
 
 def _csr_read_values(entries: list[TraceEntry]) -> dict[int, list[tuple[int, int]]]:

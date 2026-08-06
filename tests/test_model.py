@@ -74,3 +74,37 @@ def test_divider_ready_is_structural():
     assert model._fu_ready(mul)
     model.cycle = 18
     assert model._fu_ready(div)
+
+
+def test_upper_half_32b_target_waits_for_frontend_visibility():
+    model = small_model(enable_bpu=True)
+    prev = entry(0, 0x80001C1C, 0x0C4018513)  # addi
+    control = entry(1, 0x80001C20, 0xD82FF0EF)  # jal to upper-half 32-bit target
+    target = entry(2, 0x800011A2, 0x0056071B)  # addiw, 32-bit at pc[1] == 1
+    control.actual_next_pc = target.pc
+    pipe_entry = PipeEntry(control, prev_trace=prev, next_trace=target, pred_btb_hit=True)
+
+    assert model._frontend_redirect_penalty(pipe_entry) == 1
+
+
+def test_upper_half_compressed_target_has_no_frontend_wait():
+    model = small_model(enable_bpu=True)
+    prev = entry(0, 0x8000119E, 0xC19C)  # c.sw
+    control = entry(1, 0x800011A0, 0x8082)  # c.jr
+    target = entry(2, 0x800010A2, 0x4808)  # c.lw, compressed at pc[1] == 1
+    control.actual_next_pc = target.pc
+    pipe_entry = PipeEntry(control, prev_trace=prev, next_trace=target, pred_btb_hit=True)
+
+    assert model._frontend_redirect_penalty(pipe_entry) == 0
+
+
+def test_load_use_branch_stall_suppresses_frontend_wait():
+    model = small_model(enable_bpu=True)
+    prev = entry(0, 0x80001C5E, 0x47B2)  # c.lwsp x15
+    control = entry(1, 0x80001C60, 0xFEA793E3)  # bne x15, x10, upper-half target
+    target = entry(2, 0x80001C46, 0xBB41C783)  # lbu, 32-bit at pc[1] == 1
+    control.actual_next_pc = target.pc
+    pipe_entry = PipeEntry(control, prev_trace=prev, next_trace=target, pred_btb_hit=True)
+
+    assert model._previous_load_feeds(pipe_entry)
+    assert model._frontend_redirect_penalty(pipe_entry) == 0
