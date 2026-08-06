@@ -44,6 +44,13 @@ The simulator may time out after writing `app_log` and `rtl.dump`; read both
 files after timeout. Do not commit generated traces, benchmark binaries, or
 `code.mem`.
 
+Long runs can split the commit trace every 10,000,000 instructions. Pass all
+split files to the model in order:
+
+```sh
+../.venv/bin/python3 model.py ../benchmarks/output/rtl.dump ../benchmarks/output/rtl1.dump
+```
+
 ## Running The Model
 
 ```sh
@@ -65,6 +72,34 @@ For quick iteration:
 ```sh
 ../.venv/bin/python3 model.py ../benchmarks/output/rtl.dump --limit 100000
 ```
+
+Current calibrated CoreMark result on the stamped 40-iteration run:
+
+```text
+accuracy: 99.233944%
+model cycles: 14,854,777
+RTL app_log cycles: 14,965,227
+cycle delta: -110,450 (-0.738%)
+```
+
+Held-out Dhrystone result after CoreMark calibration:
+
+```text
+accuracy: 99.655836%
+model cycles: 167,113
+RTL app_log cycles: 167,827
+cycle delta: -714 (-0.425%)
+```
+
+The main CoreMark accuracy jumps came from:
+
+- decoding RV64 compressed `c.ld/c.sd/c.ldsp/c.sdsp` separately from floating
+  `c.fld/c.fsd/c.fldsp/c.fsdsp`
+- matching the BTB entry `hi` bit against the compressed halfword at prediction
+  time
+- reproducing the BSV `fn_hash` width behavior where `_h << shift` keeps
+  `Bit#(histbits)` width before `zeroExtend`
+- applying predictor training one model cycle after execute
 
 ## Accuracy Metric
 
@@ -88,9 +123,11 @@ This avoids hiding a persistent offset after one early mistake.
 - `bypass_sources`, `wawid`
 - `bpu` and `compressed`
 
-The fixed hit latencies and flush penalties are constructor parameters:
+The fixed hit latencies, flush penalties, and predictor timing switches are
+constructor parameters:
 `load_hit_latency`, `store_hit_latency`, `branch_mispredict_penalty`,
-`wb_flush_penalty`, and `csr_latency`.
+`wb_flush_penalty`, `csr_latency`, `predictor_train_delay`,
+`match_btb_hi`, and `bsv_hash_truncate`.
 
 ## Current Limitations
 
@@ -106,4 +143,3 @@ The model does not capture:
 
 These limits are deliberate for the first single-issue model and should be
 revisited only when mismatch grouping shows they dominate the residual error.
-

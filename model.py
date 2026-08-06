@@ -73,6 +73,15 @@ class PipeEntry:
         return (self.insn.rd_type, self.insn.rd)
 
 
+@dataclass(slots=True)
+class PredictorTraining:
+    apply_cycle: int
+    trace: TraceEntry
+    state: int
+    btbhit: bool
+    history: int
+
+
 class FixedQueue:
     def __init__(self, capacity: int):
         self.capacity = max(1, int(capacity))
@@ -113,6 +122,8 @@ class BranchPredictor:
         rasdepth: int,
         compressed: bool = True,
         enabled: bool = True,
+        match_btb_hi: bool = True,
+        bsv_hash_truncate: bool = True,
     ) -> None:
         self.btbdepth = btbdepth
         self.bhtdepth = bhtdepth
@@ -121,6 +132,8 @@ class BranchPredictor:
         self.rasdepth = rasdepth
         self.compressed = compressed
         self.enabled = enabled
+        self.match_btb_hi = match_btb_hi
+        self.bsv_hash_truncate = bsv_hash_truncate
         self.bhtcols = 2 if compressed else 1
         self.bht_rows = max(1, bhtdepth // self.bhtcols)
         self.bht = [[1 for _ in range(self.bht_rows)] for _ in range(self.bhtcols)]
@@ -135,7 +148,7 @@ class BranchPredictor:
         if not self.enabled:
             return None, 1, False, self.ghr, "Branch", False
 
-        idx = self._lookup(pc)
+        idx = self._lookup(pc, hi=bool(entry.pc & 0x2) if self.compressed and self.match_btb_hi else None)
         state = 1
         hit = idx is not None
         ci = "Branch"
@@ -217,14 +230,23 @@ class BranchPredictor:
         row_bits = int(math.log2(rows)) if rows > 1 else 0
         pc_hash = ((pc >> 2) ^ ((pc >> (2 + row_bits)) & 0b11)) & (rows - 1)
         hist = (history >> max(0, self.histlen - self.histbits)) & ((1 << self.histbits) - 1)
-        hist_hash = (hist << max(0, int(math.log2(self.bhtdepth)) - self.histbits)) & (rows - 1)
+        hist_shift = max(0, int(math.log2(self.bhtdepth)) - self.histbits)
+        if self.bsv_hash_truncate:
+            # In BSV, shifting a Bit#(histbits) keeps the same result width
+            # before zeroExtend() widens it to the BHT row index.
+            hist_hash = (hist << hist_shift) & ((1 << self.histbits) - 1)
+        else:
+            hist_hash = (hist << hist_shift) & (rows - 1)
         return (pc_hash ^ hist_hash) & (rows - 1)
 
-    def _lookup(self, aligned_pc: int) -> Optional[int]:
+    def _lookup(self, aligned_pc: int, hi: Optional[bool] = None) -> Optional[int]:
         tag = aligned_pc >> 2
         for idx, entry in enumerate(self.btb):
-            if entry is not None and entry["tag"] == tag:
-                return idx
+            if entry is None or entry["tag"] != tag:
+                continue
+            if hi is not None and bool(entry.get("hi", False)) != hi:
+                continue
+            return idx
         return None
 
     def _insert_history(self, bit_value: int, history: int) -> int:
@@ -270,8 +292,12 @@ class Model:
         load_hit_latency: int = 1,
         store_hit_latency: int = 1,
         csr_latency: int = 1,
-        branch_mispredict_penalty: int = 2,
+        branch_mispredict_penalty: int = 1,
         upper_half_32b_target_penalty: int = 1,
+        upper_half_32b_mispredict_penalty: int = 0,
+        load_to_store_data_release_penalty: int = 0,
+        mul_latency_adjust: int = 0,
+        predictor_train_delay: int = 1,
         wb_flush_penalty: int = 4,
         btbdepth: int = 32,
         bhtdepth: int = 512,
@@ -280,6 +306,8 @@ class Model:
         rasdepth: int = 8,
         enable_bpu: bool = True,
         compressed: bool = True,
+        match_btb_hi: bool = True,
+        bsv_hash_truncate: bool = True,
         issue_width: int = 1,
         commit_width: int = 1,
     ) -> None:
@@ -298,6 +326,10 @@ class Model:
         self.csr_latency = csr_latency
         self.branch_mispredict_penalty = branch_mispredict_penalty
         self.upper_half_32b_target_penalty = upper_half_32b_target_penalty
+        self.upper_half_32b_mispredict_penalty = upper_half_32b_mispredict_penalty
+        self.load_to_store_data_release_penalty = load_to_store_data_release_penalty
+        self.mul_latency_adjust = mul_latency_adjust
+        self.predictor_train_delay = predictor_train_delay
         self.wb_flush_penalty = wb_flush_penalty
         self.compressed = compressed
         self.issue_width = issue_width
@@ -310,6 +342,8 @@ class Model:
             rasdepth=rasdepth,
             compressed=compressed,
             enabled=enable_bpu,
+            match_btb_hi=match_btb_hi,
+            bsv_hash_truncate=bsv_hash_truncate,
         )
         self.scoreboard: dict[tuple[str, int], int] = {}
         self.next_wawid = 0
@@ -319,6 +353,8 @@ class Model:
         self.flush_countdown = 0
         self.fetch_blocked_by: Optional[int] = None
         self.div_busy_until = 0
+        self.load_release_cycle: dict[tuple[str, int], int] = {}
+        self.pending_predictor_training: Deque[PredictorTraining] = deque()
 
     @classmethod
     def from_repo(cls, repo_root: str | Path, **overrides: int | bool) -> "Model":
@@ -375,11 +411,15 @@ class Model:
         self.flush_countdown = 0
         self.fetch_blocked_by = None
         self.div_busy_until = 0
+        self.load_release_cycle.clear()
+        self.pending_predictor_training.clear()
 
     def try_commit(self) -> bool:
         if self.q_s4s5.empty():
             return False
         entry = self.q_s4s5.pop()
+        if entry.insn.is_load and entry.rd_key is not None:
+            self.load_release_cycle[entry.rd_key] = self.cycle
         self._release_scoreboard(entry)
         if entry.wb_kind == "SYSTEM" and (entry.insn.is_csr or entry.insn.name == "xret"):
             # CSR responses are normally single-cycle in this CSRBox, but the
@@ -438,10 +478,11 @@ class Model:
         if insn.is_control:
             if entry.pred_mispredict:
                 self.predictor.restore_after_mispredict(entry.pred_btb_hit, entry.pred_history)
-                self.flush_countdown = max(self.flush_countdown, self.branch_mispredict_penalty)
+                penalty = self.branch_mispredict_penalty + self._upper_half_32b_mispredict_extra(entry)
+                self.flush_countdown = max(self.flush_countdown, penalty)
                 if self.fetch_blocked_by == entry.trace.index:
                     self.fetch_blocked_by = None
-            self.predictor.train(entry.trace, entry.pred_state, entry.pred_btb_hit, entry.pred_history)
+            self._schedule_predictor_training(entry)
         if insn.is_div:
             self.div_busy_until = self.cycle + self.div_latency
         if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
@@ -461,6 +502,7 @@ class Model:
         return True
 
     def try_fetch(self, entries: list[TraceEntry]) -> bool:
+        self._apply_pending_predictor_training()
         if self.fetch_index >= len(entries) or self.q_s0s1.full():
             return False
         if self.flush_countdown > 0:
@@ -490,12 +532,31 @@ class Model:
         self.fetch_index += 1
         return True
 
+    def _schedule_predictor_training(self, entry: PipeEntry) -> None:
+        self.pending_predictor_training.append(
+            PredictorTraining(
+                apply_cycle=self.cycle + self.predictor_train_delay,
+                trace=entry.trace,
+                state=entry.pred_state,
+                btbhit=entry.pred_btb_hit,
+                history=entry.pred_history,
+            )
+        )
+        self._apply_pending_predictor_training()
+
+    def _apply_pending_predictor_training(self) -> None:
+        while self.pending_predictor_training and self.pending_predictor_training[0].apply_cycle <= self.cycle:
+            training = self.pending_predictor_training.popleft()
+            self.predictor.train(training.trace, training.state, training.btbhit, training.history)
+
     def _fu_ready(self, insn: Instruction) -> bool:
         if insn.is_div:
             return self.cycle >= self.div_busy_until
         return True
 
     def _operands_available(self, insn: Instruction) -> bool:
+        if self._store_data_waits_for_load_release(insn):
+            return False
         for key in insn.source_regs():
             locked_id = self.scoreboard.get(key)
             if locked_id is None:
@@ -521,6 +582,17 @@ class Model:
                 return True
         return False
 
+    def _store_data_waits_for_load_release(self, insn: Instruction) -> bool:
+        if self.load_to_store_data_release_penalty <= 0:
+            return False
+        if not insn.is_store or not insn.uses_rs2:
+            return False
+        key = (insn.rs2_type, insn.rs2)
+        release_cycle = self.load_release_cycle.get(key)
+        if release_cycle is None:
+            return False
+        return self.cycle - release_cycle < self.load_to_store_data_release_penalty
+
     def _frontend_redirect_penalty(self, entry: PipeEntry) -> int:
         if not self.compressed or self.upper_half_32b_target_penalty <= 0:
             return 0
@@ -536,6 +608,15 @@ class Model:
         if self._previous_load_feeds(entry):
             return 0
         return self.upper_half_32b_target_penalty
+
+    def _upper_half_32b_mispredict_extra(self, entry: PipeEntry) -> int:
+        if not self.compressed or self.upper_half_32b_mispredict_penalty <= 0:
+            return 0
+        if not entry.pred_btb_hit or entry.insn.length != 4 or not (entry.trace.pc & 0x2):
+            return 0
+        if entry.predicted_next_pc is None or entry.predicted_next_pc == entry.insn.fallthrough_pc:
+            return 0
+        return self.upper_half_32b_mispredict_penalty
 
     def _previous_load_feeds(self, entry: PipeEntry) -> bool:
         prev = entry.prev_trace
@@ -564,7 +645,7 @@ class Model:
         if insn.is_store or insn.is_fence or insn.is_fence_i:
             return self.cycle + self.store_hit_latency
         if insn.is_mul:
-            return self.cycle + self.mul_latency
+            return self.cycle + self.mul_latency + self.mul_latency_adjust
         if insn.is_div:
             return self.cycle + self.div_latency
         if insn.is_csr or insn.fu == "SYSTEM":
@@ -593,10 +674,17 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="Only parse the first N committed instructions")
     parser.add_argument("--no-auto-window", action="store_true", help="Use the whole parsed trace instead of the app_log IPC window")
     parser.add_argument("--window", metavar="START:END", help="Use an explicit 0-based trace index window, END exclusive")
-    parser.add_argument("--mispredict-penalty", type=int, default=2)
+    parser.add_argument("--mispredict-penalty", type=int, default=1)
     parser.add_argument("--load-hit-latency", type=int, default=1)
     parser.add_argument("--store-hit-latency", type=int, default=1)
     parser.add_argument("--upper-half-32b-target-penalty", type=int, default=1)
+    parser.add_argument("--upper-half-32b-mispredict-penalty", type=int, default=0)
+    parser.add_argument("--load-to-store-data-release-penalty", type=int, default=0)
+    parser.add_argument("--mul-latency-adjust", type=int, default=0)
+    parser.add_argument("--predictor-train-delay", type=int, default=1)
+    parser.add_argument("--no-match-btb-hi", action="store_true")
+    parser.add_argument("--no-bsv-hash-truncate", dest="bsv_hash_truncate", action="store_false")
+    parser.set_defaults(bsv_hash_truncate=True)
     parser.add_argument("--show-discrepancies", type=int, default=12)
     args = parser.parse_args()
 
@@ -622,6 +710,12 @@ def main() -> int:
         load_hit_latency=args.load_hit_latency,
         store_hit_latency=args.store_hit_latency,
         upper_half_32b_target_penalty=args.upper_half_32b_target_penalty,
+        upper_half_32b_mispredict_penalty=args.upper_half_32b_mispredict_penalty,
+        load_to_store_data_release_penalty=args.load_to_store_data_release_penalty,
+        mul_latency_adjust=args.mul_latency_adjust,
+        predictor_train_delay=args.predictor_train_delay,
+        match_btb_hi=not args.no_match_btb_hi,
+        bsv_hash_truncate=args.bsv_hash_truncate,
     )
     cycles = model.run(entries)
     result = compute_accuracy(entries, cycles)

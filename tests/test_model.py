@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from model import Model, PipeEntry
+from model import BranchPredictor, Model, PipeEntry
 from trace import TraceEntry
 
 
@@ -64,6 +64,18 @@ def test_load_result_is_not_bypassable_from_s3s4_memory_slot():
     assert model._operands_available(consumer)
 
 
+def test_store_data_can_wait_for_same_cycle_load_release():
+    model = small_model(load_to_store_data_release_penalty=1)
+    model.cycle = 10
+    model.load_release_cycle[("x", 1)] = 10
+    store = entry(1, 0x1004, 0x00103023).insn  # sd x1, 0(x0)
+
+    assert not model._operands_available(store)
+
+    model.cycle = 11
+    assert model._operands_available(store)
+
+
 def test_divider_ready_is_structural():
     model = small_model()
     model.cycle = 10
@@ -74,6 +86,14 @@ def test_divider_ready_is_structural():
     assert model._fu_ready(mul)
     model.cycle = 18
     assert model._fu_ready(div)
+
+
+def test_mul_latency_adjust_extends_result_ready_cycle():
+    model = small_model(mul_latency=2, mul_latency_adjust=1)
+    model.cycle = 7
+    mul = entry(1, 0x1004, 0x023100B3).insn
+
+    assert model._result_ready_cycle(mul) == 10
 
 
 def test_upper_half_32b_target_waits_for_frontend_visibility():
@@ -108,3 +128,76 @@ def test_load_use_branch_stall_suppresses_frontend_wait():
 
     assert model._previous_load_feeds(pipe_entry)
     assert model._frontend_redirect_penalty(pipe_entry) == 0
+
+
+def test_upper_half_32b_mispredict_extra_requires_predicted_redirect():
+    model = small_model(enable_bpu=True, upper_half_32b_mispredict_penalty=1)
+    control = entry(1, 0x80002986, 0xFE039BE3)  # bnez, 32-bit at pc[1] == 1
+    pipe_entry = PipeEntry(
+        control,
+        pred_btb_hit=True,
+        pred_mispredict=True,
+        predicted_next_pc=0x8000297C,
+    )
+
+    assert model._upper_half_32b_mispredict_extra(pipe_entry) == 1
+
+    pipe_entry.predicted_next_pc = control.insn.fallthrough_pc
+    assert model._upper_half_32b_mispredict_extra(pipe_entry) == 0
+
+
+def test_predictor_training_can_be_delayed_one_cycle():
+    model = small_model(enable_bpu=True, predictor_train_delay=1)
+    control = entry(0, 0x80001000, 0x0080006F)  # jal x0, +8
+    control.actual_next_pc = 0x80001008
+    pipe_entry = PipeEntry(control, pred_state=3, pred_btb_hit=False, pred_history=0)
+    model.cycle = 4
+
+    model._schedule_predictor_training(pipe_entry)
+    assert model.predictor._lookup(control.pc & ~0x3) is None
+
+    model.cycle = 5
+    model._apply_pending_predictor_training()
+    assert model.predictor._lookup(control.pc & ~0x3) is not None
+
+
+def test_predictor_btb_hit_can_require_compressed_hi_match():
+    predictor = BranchPredictor(
+        btbdepth=4,
+        bhtdepth=8,
+        histlen=4,
+        histbits=2,
+        rasdepth=2,
+        compressed=True,
+        match_btb_hi=True,
+    )
+    predictor.btb[0] = {"tag": 0x80001000 >> 2, "target": 0x80002000, "ci": "Branch", "instr16": True, "hi": True}
+
+    assert predictor._lookup(0x80001000, hi=True) == 0
+    assert predictor._lookup(0x80001000, hi=False) is None
+    assert predictor._lookup(0x80001000) == 0
+
+
+def test_bsv_hash_truncates_shifted_history_width_before_zero_extend():
+    predictor = BranchPredictor(
+        btbdepth=4,
+        bhtdepth=512,
+        histlen=8,
+        histbits=5,
+        rasdepth=2,
+        compressed=True,
+        bsv_hash_truncate=True,
+    )
+    non_truncated = BranchPredictor(
+        btbdepth=4,
+        bhtdepth=512,
+        histlen=8,
+        histbits=5,
+        rasdepth=2,
+        compressed=True,
+        bsv_hash_truncate=False,
+    )
+    history = 0b10101000
+
+    assert predictor._hash(history, 0) == 0b10000
+    assert non_truncated._hash(history, 0) == 0b01010000

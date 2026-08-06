@@ -318,8 +318,14 @@ def _decode_compressed(enc: int, pc: int) -> Instruction:
             inst.rs1 = 2
             inst.uses_rs1 = True
             return inst
-        if funct3 in (1, 3):
+        if funct3 == 1:
             inst = _with_rd(_cbase(enc, pc, "c.fld", "MEMORY"), rdp, FRF)
+            inst.rs1 = rs1p
+            inst.uses_rs1 = True
+            inst.is_load = True
+            return inst
+        if funct3 == 3:
+            inst = _with_rd(_cbase(enc, pc, "c.ld", "MEMORY"), rdp)
             inst.rs1 = rs1p
             inst.uses_rs1 = True
             inst.is_load = True
@@ -330,11 +336,19 @@ def _decode_compressed(enc: int, pc: int) -> Instruction:
             inst.uses_rs1 = True
             inst.is_load = True
             return inst
-        if funct3 in (5, 7):
+        if funct3 == 5:
             inst = _cbase(enc, pc, "c.fsd", "MEMORY")
             inst.rs1 = rs1p
             inst.rs2 = rs2p
             inst.rs2_type = FRF
+            inst.uses_rs1 = True
+            inst.uses_rs2 = True
+            inst.is_store = True
+            return inst
+        if funct3 == 7:
+            inst = _cbase(enc, pc, "c.sd", "MEMORY")
+            inst.rs1 = rs1p
+            inst.rs2 = rs2p
             inst.uses_rs1 = True
             inst.uses_rs2 = True
             inst.is_store = True
@@ -416,8 +430,14 @@ def _decode_compressed(enc: int, pc: int) -> Instruction:
             inst.rs1 = rd
             inst.uses_rs1 = rd != 0
             return inst
-        if funct3 in (1, 3):
+        if funct3 == 1:
             inst = _with_rd(_cbase(enc, pc, "c.fldsp", "MEMORY"), rd, FRF)
+            inst.rs1 = 2
+            inst.uses_rs1 = True
+            inst.is_load = True
+            return inst
+        if funct3 == 3:
+            inst = _with_rd(_cbase(enc, pc, "c.ldsp", "MEMORY"), rd)
             inst.rs1 = 2
             inst.uses_rs1 = True
             inst.is_load = True
@@ -456,11 +476,19 @@ def _decode_compressed(enc: int, pc: int) -> Instruction:
             inst.uses_rs1 = True
             inst.uses_rs2 = True
             return inst
-        if funct3 in (5, 7):
+        if funct3 == 5:
             inst = _cbase(enc, pc, "c.fsdsp", "MEMORY")
             inst.rs1 = 2
             inst.rs2 = rs2
             inst.rs2_type = FRF
+            inst.uses_rs1 = True
+            inst.uses_rs2 = True
+            inst.is_store = True
+            return inst
+        if funct3 == 7:
+            inst = _cbase(enc, pc, "c.sdsp", "MEMORY")
+            inst.rs1 = 2
+            inst.rs2 = rs2
             inst.uses_rs1 = True
             inst.uses_rs2 = True
             inst.is_store = True

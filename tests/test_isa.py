@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from isa import FRF, decode
+from isa import FRF, IRF, decode
 
 
 def test_decode_integer_alu_sources_and_rd():
@@ -73,3 +73,10 @@ def test_decode_compressed_common_forms():
     assert c_fsdsp.fu == "MEMORY"
     assert c_fsdsp.is_store
     assert c_fsdsp.rs2_type == FRF
+
+    c_sdsp = decode(0xF05A, pc=0x3006)
+    assert c_sdsp.name == "c.sdsp"
+    assert c_sdsp.fu == "MEMORY"
+    assert c_sdsp.is_store
+    assert c_sdsp.rs2 == 22
+    assert c_sdsp.rs2_type == IRF
