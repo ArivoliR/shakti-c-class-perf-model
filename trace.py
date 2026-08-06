@@ -86,7 +86,7 @@ class BenchmarkWindow:
         return trace_entries[self.start_index : self.end_index]
 
 
-def parse_line(line: str, index: int = 0) -> Optional[TraceEntry]:
+def parse_line(line: str, index: int = 0, *, keep_raw: bool = False) -> Optional[TraceEntry]:
     line = line.rstrip("\n")
     match = TRACE_RE.match(line.strip())
     if not match:
@@ -98,7 +98,7 @@ def parse_line(line: str, index: int = 0) -> Optional[TraceEntry]:
         mode=match.group("mode"),
         pc=int(match.group("pc"), 16),
         encoding=int(match.group("inst"), 16),
-        raw=line,
+        raw=line if keep_raw else "",
     )
     for reg in REG_RE.finditer(rest):
         entry.reg_writes.append(RegWrite(reg.group("kind"), int(reg.group("reg")), int(reg.group("value"), 16)))
@@ -109,10 +109,10 @@ def parse_line(line: str, index: int = 0) -> Optional[TraceEntry]:
     return entry
 
 
-def parse_trace_lines(lines: Iterable[str], limit: Optional[int] = None) -> list[TraceEntry]:
+def parse_trace_lines(lines: Iterable[str], limit: Optional[int] = None, *, keep_raw: bool = False) -> list[TraceEntry]:
     entries: list[TraceEntry] = []
     for line in lines:
-        entry = parse_line(line, len(entries))
+        entry = parse_line(line, len(entries), keep_raw=keep_raw)
         if entry is None:
             continue
         entries.append(entry)
@@ -122,16 +122,21 @@ def parse_trace_lines(lines: Iterable[str], limit: Optional[int] = None) -> list
     return entries
 
 
-def parse_trace(path: str | Path, limit: Optional[int] = None) -> list[TraceEntry]:
-    return parse_trace_files([path], limit=limit)
+def parse_trace(path: str | Path, limit: Optional[int] = None, *, keep_raw: bool = False) -> list[TraceEntry]:
+    return parse_trace_files([path], limit=limit, keep_raw=keep_raw)
 
 
-def parse_trace_files(paths: Sequence[str | Path], limit: Optional[int] = None) -> list[TraceEntry]:
+def parse_trace_files(
+    paths: Sequence[str | Path],
+    limit: Optional[int] = None,
+    *,
+    keep_raw: bool = False,
+) -> list[TraceEntry]:
     entries: list[TraceEntry] = []
     for path in paths:
         with Path(path).open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                entry = parse_line(line, len(entries))
+                entry = parse_line(line, len(entries), keep_raw=keep_raw)
                 if entry is None:
                     continue
                 entries.append(entry)

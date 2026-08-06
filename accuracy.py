@@ -92,3 +92,83 @@ def rank_discrepancies(
         parts.extend(f"  {line}" for line in examples)
     return "\n".join(parts)
 
+
+def summarize_control_discrepancies(
+    entries: list[TraceEntry],
+    mismatches: Iterable[tuple[int, int, int]],
+    *,
+    window: int = 6,
+    limit: int = 12,
+) -> str:
+    """Group spacing mismatches by nearby control-flow instruction shape."""
+
+    control_indices = [idx for idx, entry in enumerate(entries) if entry.insn.is_control]
+    control_pos = 0
+    last_control_idx: Optional[int] = None
+    by_distance: Counter[str] = Counter()
+    by_control: Counter[str] = Counter()
+    by_control_shape: Counter[str] = Counter()
+    by_delta: Counter[str] = Counter()
+    examples: list[str] = []
+
+    for idx, rtl_delta, model_delta in mismatches:
+        while control_pos < len(control_indices) and control_indices[control_pos] <= idx:
+            last_control_idx = control_indices[control_pos]
+            control_pos += 1
+
+        distance: Optional[int] = None
+        control: Optional[TraceEntry] = None
+        if last_control_idx is not None:
+            distance = idx - last_control_idx
+            if 0 <= distance <= window:
+                control = entries[last_control_idx]
+
+        if control is None or distance is None:
+            by_distance[f">{window}"] += 1
+            continue
+
+        entry = entries[idx]
+        taken = control.actual_next_pc is not None and control.actual_next_pc != control.insn.fallthrough_pc
+        control_kind = "branch" if control.insn.is_branch else "jalr" if control.insn.is_jalr else "jal"
+        shape = (
+            f"{control.insn.name} {control_kind} "
+            f"{'taken' if taken else 'fallthrough'} "
+            f"{'hi' if control.pc & 0x2 else 'lo'} "
+            f"{control.insn.length * 8}b"
+        )
+        by_distance[str(distance)] += 1
+        by_control[control.insn.name] += 1
+        by_control_shape[shape] += 1
+        by_delta[f"{rtl_delta}->{model_delta}"] += 1
+        if len(examples) < limit:
+            examples.append(
+                "idx={idx} pc=0x{pc:x} {name} after {distance} from "
+                "0x{cpc:x} {cname}: rtl_delta={rtl_delta} model_delta={model_delta}".format(
+                    idx=idx,
+                    pc=entry.pc,
+                    name=entry.insn.name,
+                    distance=distance,
+                    cpc=control.pc,
+                    cname=control.insn.name,
+                    rtl_delta=rtl_delta,
+                    model_delta=model_delta,
+                )
+            )
+
+    parts: list[str] = []
+    if by_distance:
+        parts.append(f"Distance from previous control (window={window}):")
+        parts.extend(f"  {name}: {count}" for name, count in by_distance.most_common(limit))
+    if by_control:
+        parts.append("By control opcode:")
+        parts.extend(f"  {name}: {count}" for name, count in by_control.most_common(limit))
+    if by_control_shape:
+        parts.append("By control shape:")
+        parts.extend(f"  {name}: {count}" for name, count in by_control_shape.most_common(limit))
+    if by_delta:
+        parts.append("By RTL->model delta:")
+        parts.extend(f"  {name}: {count}" for name, count in by_delta.most_common(limit))
+    if examples:
+        parts.append("Examples:")
+        parts.extend(f"  {line}" for line in examples)
+    return "\n".join(parts)

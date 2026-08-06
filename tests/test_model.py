@@ -34,6 +34,31 @@ def small_model(**kwargs):
     return Model(**params)
 
 
+def dual_model(**kwargs):
+    params = dict(
+        isb_s0s1=4,
+        isb_s1s2=6,
+        isb_s2s3=2,
+        isb_s3s4=16,
+        isb_s4s5=16,
+        enable_bpu=False,
+        num_issue=2,
+        dual_policy="shakti",
+        fetch_width=2,
+        fetch_decode_width=2,
+        decode_width=1,
+        issue_width=1,
+        stage4_width=1,
+        commit_width=1,
+        memory_issue_width=1,
+        load_hit_latency=1,
+        mul_latency=4,
+        div_latency=8,
+    )
+    params.update(kwargs)
+    return Model(**params)
+
+
 def test_alu_result_bypasses_from_downstream_head():
     entries = annotate(
         [
@@ -45,6 +70,163 @@ def test_alu_result_bypasses_from_downstream_head():
     cycles = small_model().run(entries)
     assert cycles[1] - cycles[0] == 1
     assert cycles[2] - cycles[1] == 1
+
+
+def test_dual_issue_pairs_independent_alu_instructions():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
+            entry(1, 0x1004, 0x00200113),  # addi x2, x0, 2
+            entry(2, 0x1008, 0x00300193),  # addi x3, x0, 3
+            entry(3, 0x100C, 0x00400213),  # addi x4, x0, 4
+        ]
+    )
+
+    cycles = dual_model().run(entries)
+
+    assert cycles == [5, 5, 6, 6]
+
+
+def test_dual_issue_dependent_alu_waits_without_intra_bundle_forwarding():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
+            entry(1, 0x1004, 0x00108113),  # addi x2, x1, 1
+            entry(2, 0x1008, 0x00300193),  # addi x3, x0, 3
+        ]
+    )
+
+    cycles = dual_model().run(entries)
+
+    assert cycles == [5, 6, 6]
+
+
+def test_shakti_dual_issue_has_no_intra_bundle_forwarding_override():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
+            entry(1, 0x1004, 0x00108113),  # addi x2, x1, 1
+            entry(2, 0x1008, 0x00300193),  # addi x3, x0, 3
+        ]
+    )
+
+    cycles = dual_model(intra_bundle_forwarding=True).run(entries)
+
+    assert cycles == [5, 6, 6]
+
+
+def test_shakti_dual_issue_memory_pairs_are_disabled_without_dual_mem():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00003083),  # ld x1, 0(x0)
+            entry(1, 0x1004, 0x00003103),  # ld x2, 0(x0)
+            entry(2, 0x1008, 0x00300193),  # addi x3, x0, 3
+        ]
+    )
+
+    assert dual_model().run(entries) == [5, 6, 6]
+    assert dual_model(memory_issue_width=2).run(entries) == [5, 6, 6]
+
+
+def test_shakti_dual_issue_allows_waw_and_war_pairs():
+    waw = annotate(
+        [
+            entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
+            entry(1, 0x1004, 0x00200093),  # addi x1, x0, 2
+        ]
+    )
+    war = annotate(
+        [
+            entry(0, 0x1000, 0x00108113),  # addi x2, x1, 1
+            entry(1, 0x1004, 0x00100093),  # addi x1, x0, 1
+        ]
+    )
+
+    assert dual_model().run(waw) == [5, 5]
+    assert dual_model().run(war) == [5, 5]
+
+
+def test_shakti_dual_issue_pairing_whitelist_is_exact():
+    model = dual_model()
+    alu = entry(0, 0x1000, 0x00100093).insn
+    load = entry(1, 0x1004, 0x00003103).insn
+    store = entry(2, 0x1008, 0x00203023).insn
+    mul = entry(3, 0x100C, 0x023100B3).insn
+    branch = entry(4, 0x1010, 0x00000463).insn  # beq x0, x0, +8
+    trap = entry(5, 0x1014, 0x00000073).insn  # ecall
+
+    assert model._can_pair_shakti(alu, load)
+    assert model._can_pair_shakti(load, alu)
+    assert model._can_pair_shakti(branch, load)
+    assert model._can_pair_shakti(load, branch)
+    assert not model._can_pair_shakti(load, load)
+    assert not model._can_pair_shakti(load, store)
+    assert not model._can_pair_shakti(load, mul)
+    assert not model._can_pair_shakti(branch, branch)
+    assert not model._can_pair_shakti(alu, trap)
+
+
+def test_shakti_pair_decision_reports_branch_branch():
+    model = dual_model()
+    branch = entry(0, 0x1000, 0x00000463).insn  # beq x0, x0, +8
+    other_branch = entry(1, 0x1004, 0x00000463).insn
+
+    assert model._shakti_pair_decision(branch, other_branch) == (False, "CONTROL+CONTROL")
+
+
+def test_branch_branch_experiment_still_needs_two_control_slots():
+    one_control = dual_model(allow_branch_branch=True, control_issue_width=1)
+    two_control = dual_model(allow_branch_branch=True, control_issue_width=2)
+    branch0 = PipeEntry(entry(0, 0x1000, 0x00000463))  # beq x0, x0, +8
+    branch1 = PipeEntry(entry(1, 0x1004, 0x00000463))
+
+    assert one_control._can_pair_shakti(branch0.insn, branch1.insn)
+    assert not one_control._bundle_fu_ready([branch0, branch1])
+    assert two_control._bundle_fu_ready([branch0, branch1])
+
+
+def test_shakti_dual_mem_only_enables_load_store_memory_pairs():
+    model = dual_model(dual_mem=True)
+    load = entry(0, 0x1000, 0x00003083).insn
+    other_load = entry(1, 0x1004, 0x00003103).insn
+    store = entry(2, 0x1008, 0x00203023).insn
+
+    assert not model._can_pair_shakti(load, other_load)
+    assert model._can_pair_shakti(load, store)
+    assert model._can_pair_shakti(store, load)
+
+
+def test_shakti_dual_issue_stage4_and_commit_are_atomic_for_pairs():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
+            entry(1, 0x1004, 0x00003103),  # ld x2, 0(x0)
+        ]
+    )
+
+    assert dual_model(load_hit_latency=3).run(entries) == [7, 7]
+
+
+def test_decoupled_lockstep_experiment_can_issue_ready_older_slot():
+    locked = dual_model()
+    decoupled = dual_model(lockstep_bundles=False)
+    for model in (locked, decoupled):
+        model.cycle = 2
+        model.div_busy_until = 6
+        alu = PipeEntry(entry(0, 0x1000, 0x00100093))  # addi x1, x0, 1
+        div = PipeEntry(entry(1, 0x1004, 0x023140B3))  # div x1, x2, x3
+        for pos, pipe_entry in enumerate((alu, div)):
+            pipe_entry.bundle_id = 11
+            pipe_entry.bundle_pos = pos
+            pipe_entry.bundle_size = 2
+            model.q_s2s3.push(pipe_entry)
+
+    assert not locked.try_execute()
+    assert locked.q_s2s3.first().trace.index == 0
+
+    assert decoupled.try_execute()
+    assert len(decoupled.q_s2s3) == 1
+    assert decoupled.q_s2s3.first().trace.index == 1
 
 
 def test_load_result_is_not_bypassable_from_s3s4_memory_slot():
@@ -61,6 +243,27 @@ def test_load_result_is_not_bypassable_from_s3s4_memory_slot():
     model.q_s3s4.pop()
     load.bypassable = True
     model.q_s4s5.push(load)
+    assert model._operands_available(consumer)
+
+
+def test_shakti_dual_bypass_sees_second_slot_of_downstream_bundle():
+    model = dual_model()
+    first = PipeEntry(entry(0, 0x1000, 0x00100093))  # addi x1, x0, 1
+    second = PipeEntry(entry(1, 0x1004, 0x00200113))  # addi x2, x0, 2
+    for pos, pipe_entry in enumerate((first, second)):
+        pipe_entry.bundle_id = 7
+        pipe_entry.bundle_pos = pos
+        pipe_entry.bundle_size = 2
+        pipe_entry.issued_cycle = 9
+        pipe_entry.bypassable = True
+        pipe_entry.bypass_ready_cycle = 10
+    second.scoreboard_id = 5
+    model.cycle = 10
+    model.scoreboard[("x", 2)] = 5
+    model.q_s3s4.push(first)
+    model.q_s3s4.push(second)
+
+    consumer = entry(2, 0x1008, 0x00110193).insn  # addi x3, x2, 1
     assert model._operands_available(consumer)
 
 
@@ -144,6 +347,81 @@ def test_upper_half_32b_mispredict_extra_requires_predicted_redirect():
 
     pipe_entry.predicted_next_pc = control.insn.fallthrough_pc
     assert model._upper_half_32b_mispredict_extra(pipe_entry) == 0
+
+
+def test_wrong_path_frontend_fetches_stale_entries_while_redirect_is_unresolved():
+    model = small_model(wrong_path_frontend=True)
+    model.fetch_blocked_by = 99
+    entries = [entry(0, 0x1000, 0x00100093)]
+
+    assert model.try_fetch(entries)
+    assert model.fetch_index == 0
+    assert len(model.q_s0s1) == 1
+    assert model.q_s0s1.first().stale_frontend
+
+
+def test_wrong_path_frontend_can_be_disabled():
+    model = small_model(wrong_path_frontend=False)
+    model.fetch_blocked_by = 99
+    entries = [entry(0, 0x1000, 0x00100093)]
+
+    assert not model.try_fetch(entries)
+    assert model.fetch_index == 0
+    assert model.q_s0s1.empty()
+
+
+def test_flushed_stale_frontend_entries_drop_before_execute():
+    model = small_model(wrong_path_frontend=True)
+    model.stale_frontend_flushed = True
+
+    model.q_s0s1.push(model._make_stale_frontend_entry())
+    assert model.try_fetch_decode()
+    assert model.q_s0s1.empty()
+    assert model.q_s1s2.empty()
+    assert model.frontend_drop_fetch_hold == 1
+
+    model.q_s1s2.push(model._make_stale_frontend_entry())
+    assert model.try_decode()
+    assert model.q_s1s2.empty()
+    assert model.q_s2s3.empty()
+
+
+def test_s0s1_stale_drop_can_hold_target_fetch_one_cycle():
+    model = small_model(wrong_path_frontend=True)
+    model.stale_frontend_flushed = True
+    model.q_s0s1.push(model._make_stale_frontend_entry())
+    entries = [entry(0, 0x1000, 0x00100093)]
+
+    assert model.try_fetch_decode()
+    assert not model.try_fetch(entries)
+    assert model.fetch_index == 0
+
+    model.cycle += 1
+    assert model.try_fetch(entries)
+    assert model.fetch_index == 1
+
+
+def test_stale_frontend_entries_drop_in_execute_even_when_writeback_queue_is_full():
+    model = small_model(isb_s3s4=1, wrong_path_frontend=True)
+    model.q_s3s4.push(PipeEntry(entry(0, 0x1000, 0x00100093)))
+    model.q_s2s3.push(model._make_stale_frontend_entry())
+
+    assert model.try_execute()
+    assert model.q_s2s3.empty()
+    assert len(model.q_s3s4) == 1
+
+
+def test_mispredict_resolution_starts_stale_frontend_flush():
+    model = small_model(enable_bpu=True, wrong_path_frontend=True)
+    control = entry(1, 0x1000, 0x0080006F)  # jal x0, +8
+    control.actual_next_pc = 0x1008
+    pipe_entry = PipeEntry(control, pred_mispredict=True, pred_btb_hit=False, pred_history=0)
+    model.fetch_blocked_by = control.index
+    model.q_s2s3.push(pipe_entry)
+
+    assert model.try_execute()
+    assert model.fetch_blocked_by is None
+    assert model.stale_frontend_flushed
 
 
 def test_predictor_training_can_be_delayed_one_cycle():

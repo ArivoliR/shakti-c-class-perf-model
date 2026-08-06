@@ -6,7 +6,7 @@ rtldump. It models timing and hazards, not architectural data values.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
 import argparse
@@ -14,7 +14,7 @@ import math
 import re
 from typing import Deque, Optional
 
-from accuracy import compute_accuracy, rank_discrepancies
+from accuracy import compute_accuracy, rank_discrepancies, summarize_control_discrepancies
 from isa import FRF, IRF, Instruction
 from trace import (
     BenchmarkWindow,
@@ -24,6 +24,7 @@ from trace import (
     parse_app_log_metrics,
     parse_trace_files,
 )
+from trace_cache import load_or_parse_trace_files
 
 
 def parse_makefile_defines(path: str | Path) -> dict[str, int | bool | str]:
@@ -61,6 +62,11 @@ class PipeEntry:
     bypassable: bool = False
     bypass_ready_cycle: int = 0
     wb_kind: str = "BASE"
+    stale_frontend: bool = False
+    issued_cycle: int = -1
+    bundle_id: int = -1
+    bundle_pos: int = 0
+    bundle_size: int = 1
 
     @property
     def insn(self) -> Instruction:
@@ -82,6 +88,20 @@ class PredictorTraining:
     history: int
 
 
+@dataclass(slots=True)
+class ControlEvent:
+    local_index: int
+    trace_index: int
+    pc: int
+    name: str
+    predicted_next_pc: Optional[int]
+    pred_state: int
+    pred_btb_hit: bool
+    pred_history: int
+    pred_ci: str
+    pred_mispredict: bool
+
+
 class FixedQueue:
     def __init__(self, capacity: int):
         self.capacity = max(1, int(capacity))
@@ -96,11 +116,17 @@ class FixedQueue:
     def full(self) -> bool:
         return len(self.items) >= self.capacity
 
+    def space(self) -> int:
+        return self.capacity - len(self.items)
+
     def empty(self) -> bool:
         return not self.items
 
     def first(self) -> PipeEntry:
         return self.items[0]
+
+    def peek(self, index: int) -> PipeEntry:
+        return self.items[index]
 
     def push(self, entry: PipeEntry) -> None:
         if self.full():
@@ -280,6 +306,8 @@ class Model:
     def __init__(
         self,
         *,
+        num_issue: int = 1,
+        dual_policy: str = "single",
         isb_s0s1: int = 2,
         isb_s1s2: int = 2,
         isb_s2s3: int = 1,
@@ -308,10 +336,24 @@ class Model:
         compressed: bool = True,
         match_btb_hi: bool = True,
         bsv_hash_truncate: bool = True,
+        fetch_width: int = 1,
+        fetch_decode_width: int = 1,
+        decode_width: int = 1,
         issue_width: int = 1,
+        stage4_width: int = 1,
         commit_width: int = 1,
+        memory_issue_width: int = 1,
+        control_issue_width: int = 1,
+        dual_mem: bool = False,
+        lockstep_bundles: bool = True,
+        allow_branch_branch: bool = False,
+        intra_bundle_forwarding: bool = False,
+        wrong_path_frontend: bool = False,
+        stale_drop_fetch_penalty: int = 1,
     ) -> None:
         self.params = dict(locals())
+        if dual_policy not in ("single", "generic", "shakti"):
+            raise ValueError("dual_policy must be 'single', 'generic', or 'shakti'")
         self.q_s0s1 = FixedQueue(isb_s0s1)
         self.q_s1s2 = FixedQueue(isb_s1s2)
         self.q_s2s3 = FixedQueue(isb_s2s3)
@@ -332,8 +374,22 @@ class Model:
         self.predictor_train_delay = predictor_train_delay
         self.wb_flush_penalty = wb_flush_penalty
         self.compressed = compressed
+        self.num_issue = num_issue
+        self.dual_policy = dual_policy
+        self.fetch_width = fetch_width
+        self.fetch_decode_width = fetch_decode_width
+        self.decode_width = decode_width
         self.issue_width = issue_width
+        self.stage4_width = stage4_width
         self.commit_width = commit_width
+        self.memory_issue_width = memory_issue_width
+        self.control_issue_width = control_issue_width
+        self.dual_mem = dual_mem
+        self.lockstep_bundles = lockstep_bundles
+        self.allow_branch_branch = allow_branch_branch
+        self.intra_bundle_forwarding = intra_bundle_forwarding
+        self.wrong_path_frontend = wrong_path_frontend
+        self.stale_drop_fetch_penalty = stale_drop_fetch_penalty
         self.predictor = BranchPredictor(
             btbdepth=btbdepth,
             bhtdepth=bhtdepth,
@@ -355,14 +411,32 @@ class Model:
         self.div_busy_until = 0
         self.load_release_cycle: dict[tuple[str, int], int] = {}
         self.pending_predictor_training: Deque[PredictorTraining] = deque()
+        self.control_events: list[ControlEvent] = []
+        self.stale_frontend_flushed = False
+        self.frontend_drop_fetch_hold = 0
+        self.fetch_hold_blocked_cycle = -1
+        self.next_bundle_id = 0
+        self.dual_pair_bundles = 0
+        self.dual_single_bundles = 0
+        self.dual_pair_accept_counts: Counter[str] = Counter()
+        self.dual_pair_reject_counts: Counter[str] = Counter()
+        self.memory_issues_this_cycle = 0
+        self.control_issues_this_cycle = 0
+        self.redirect_this_cycle = False
+        self._stale_trace = TraceEntry(index=-1, pc=0, encoding=0x00000013, mode="0")
 
     @classmethod
-    def from_repo(cls, repo_root: str | Path, **overrides: int | bool) -> "Model":
+    def from_repo(cls, repo_root: str | Path, **overrides: int | bool | str) -> "Model":
         defines = parse_makefile_defines(Path(repo_root) / "makefile.inc")
         rasdepth = int(defines.get("rasdepth", 8)) if bool(defines.get("bpu_ras", False)) else 0
+        num_issue = int(defines.get("num_issue", 1))
+        s1s2_depth = int(defines.get("instr_queue", defines.get("isb_s1s2", 2))) if num_issue > 1 else int(
+            defines.get("isb_s1s2", 2)
+        )
         kwargs = {
+            "num_issue": num_issue,
             "isb_s0s1": int(defines.get("isb_s0s1", 2)),
-            "isb_s1s2": int(defines.get("isb_s1s2", 2)),
+            "isb_s1s2": s1s2_depth,
             "isb_s2s3": int(defines.get("isb_s2s3", 1)),
             "isb_s3s4": int(defines.get("isb_s3s4", 8)),
             "isb_s4s5": int(defines.get("isb_s4s5", 8)),
@@ -377,6 +451,7 @@ class Model:
             "rasdepth": rasdepth,
             "enable_bpu": bool(defines.get("bpu", False)),
             "compressed": bool(defines.get("compressed", False)),
+            "dual_mem": bool(defines.get("dual_mem", False)),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -387,16 +462,26 @@ class Model:
         while len(self.commits) < len(entries):
             if self.cycle > max_cycles:
                 raise RuntimeError(f"model did not drain after {max_cycles} cycles")
+            self._begin_cycle()
             for _ in range(self.commit_width):
                 self.try_commit()
-            self.try_stage4()
+            for _ in range(self.stage4_width):
+                self.try_stage4()
             for _ in range(self.issue_width):
                 self.try_execute()
-            self.try_decode()
-            self.try_fetch_decode()
-            self.try_fetch(entries)
+            for _ in range(self.decode_width):
+                self.try_decode()
+            for _ in range(self.fetch_decode_width):
+                self.try_fetch_decode()
+            for _ in range(self.fetch_width):
+                self.try_fetch(entries)
             self.cycle += 1
         return self.commits
+
+    def _begin_cycle(self) -> None:
+        self.memory_issues_this_cycle = 0
+        self.control_issues_this_cycle = 0
+        self.redirect_this_cycle = False
 
     def _reset_runtime(self) -> None:
         self.q_s0s1.items.clear()
@@ -414,50 +499,57 @@ class Model:
         self.div_busy_until = 0
         self.load_release_cycle.clear()
         self.pending_predictor_training.clear()
+        self.control_events.clear()
+        self.stale_frontend_flushed = False
+        self.frontend_drop_fetch_hold = 0
+        self.fetch_hold_blocked_cycle = -1
+        self.next_bundle_id = 0
+        self.dual_pair_bundles = 0
+        self.dual_single_bundles = 0
+        self.dual_pair_accept_counts.clear()
+        self.dual_pair_reject_counts.clear()
+        self.memory_issues_this_cycle = 0
+        self.control_issues_this_cycle = 0
+        self.redirect_this_cycle = False
 
     def try_commit(self) -> bool:
+        if self.dual_policy == "shakti":
+            return self._try_commit_shakti()
         if self.q_s4s5.empty():
             return False
         entry = self.q_s4s5.pop()
-        if entry.insn.is_load and entry.rd_key is not None:
-            self.load_release_cycle[entry.rd_key] = self.cycle
-        self._release_scoreboard(entry)
-        if entry.wb_kind == "SYSTEM" and (entry.insn.is_csr or entry.insn.name == "xret"):
-            # CSR responses are normally single-cycle in this CSRBox, but the
-            # constructor keeps this explicit for architectural experiments.
-            pass
-        self.commits.append(self.cycle)
+        self._commit_entry(entry)
         return True
 
     def try_stage4(self) -> bool:
+        if self.dual_policy == "shakti":
+            return self._try_stage4_shakti()
         if self.q_s3s4.empty() or self.q_s4s5.full():
             return False
         entry = self.q_s3s4.first()
+        if entry.stale_frontend:
+            self.q_s3s4.pop()
+            return True
         if entry.result_ready_cycle > self.cycle:
             return False
         entry = self.q_s3s4.pop()
-        entry.bypassable = entry.insn.writes_scoreboard
-        if entry.insn.is_load or entry.insn.is_mul or entry.insn.is_div or entry.insn.is_float:
-            entry.bypass_ready_cycle = self.cycle + 1
-        else:
-            entry.bypass_ready_cycle = self.cycle
-        if entry.insn.is_load or entry.insn.is_mul or entry.insn.is_div or entry.insn.is_float:
-            entry.wb_kind = "BASE"
-        elif entry.insn.is_store or entry.insn.is_fence or entry.insn.is_fence_i:
-            entry.wb_kind = "MEMORY"
-        elif entry.insn.fu == "SYSTEM":
-            entry.wb_kind = "SYSTEM"
-        elif entry.insn.fu == "TRAP":
-            entry.wb_kind = "TRAP"
-        else:
-            entry.wb_kind = "BASE"
+        self._prepare_stage5_entry(entry)
         self.q_s4s5.push(entry)
         return True
 
     def try_execute(self) -> bool:
-        if self.q_s2s3.empty() or self.q_s3s4.full():
+        if self.dual_policy == "shakti":
+            return self._try_execute_shakti()
+        if self.redirect_this_cycle:
+            return False
+        if self.q_s2s3.empty():
             return False
         entry = self.q_s2s3.first()
+        if entry.stale_frontend:
+            self.q_s2s3.pop()
+            return True
+        if self.q_s3s4.full():
+            return False
         insn = entry.insn
         if not self._fu_ready(insn):
             return False
@@ -469,6 +561,8 @@ class Model:
             return False
 
         entry = self.q_s2s3.pop()
+        self._reserve_issue_resource(insn)
+        entry.issued_cycle = self.cycle
         self._lock_scoreboard(entry)
         entry.result_ready_cycle = self._result_ready_cycle(insn)
         entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
@@ -483,33 +577,285 @@ class Model:
                 self.flush_countdown = max(self.flush_countdown, penalty)
                 if self.fetch_blocked_by == entry.trace.index:
                     self.fetch_blocked_by = None
+                self.stale_frontend_flushed = True
+                self.redirect_this_cycle = True
             self._schedule_predictor_training(entry)
         if insn.is_div:
             self.div_busy_until = self.cycle + self.div_latency
         if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
             self.flush_countdown = max(self.flush_countdown, self.wb_flush_penalty)
+            self.redirect_this_cycle = True
         return True
 
     def try_decode(self) -> bool:
-        if self.q_s1s2.empty() or self.q_s2s3.full():
+        if self.dual_policy == "shakti":
+            return self._try_decode_shakti()
+        if self.q_s1s2.empty():
+            return False
+        if self.q_s1s2.first().stale_frontend and self.stale_frontend_flushed:
+            self.q_s1s2.pop()
+            return True
+        if self.q_s2s3.full():
             return False
         self.q_s2s3.push(self.q_s1s2.pop())
         return True
 
     def try_fetch_decode(self) -> bool:
-        if self.q_s0s1.empty() or self.q_s1s2.full():
+        if self.q_s0s1.empty():
+            return False
+        if self.q_s0s1.first().stale_frontend and self.stale_frontend_flushed:
+            self.q_s0s1.pop()
+            self.frontend_drop_fetch_hold = max(self.frontend_drop_fetch_hold, self.stale_drop_fetch_penalty)
+            return True
+        if self.q_s1s2.full():
             return False
         self.q_s1s2.push(self.q_s0s1.pop())
         return True
+
+    def _try_decode_shakti(self) -> bool:
+        if self.q_s1s2.empty():
+            return False
+        if self.q_s1s2.first().stale_frontend and self.stale_frontend_flushed:
+            self.q_s1s2.pop()
+            return True
+        # s2->s3 is a one-entry vector FIFO. Even though the model stores
+        # scalar trace entries internally, a new bundle can enter only when
+        # the whole vector slot is free.
+        if not self.q_s2s3.empty():
+            return False
+
+        first = self.q_s1s2.first()
+        issue_two = False
+        if len(self.q_s1s2) >= 2:
+            second = self.q_s1s2.peek(1)
+            if not second.stale_frontend:
+                issue_two, reason = self._shakti_pair_decision(first.insn, second.insn)
+                if issue_two:
+                    self.dual_pair_accept_counts[reason] += 1
+                else:
+                    self.dual_pair_reject_counts[reason] += 1
+
+        bundle_size = 2 if issue_two else 1
+        if self.q_s2s3.space() < bundle_size:
+            return False
+
+        bundle_id = self.next_bundle_id
+        self.next_bundle_id += 1
+        if bundle_size == 2:
+            self.dual_pair_bundles += 1
+        else:
+            self.dual_single_bundles += 1
+        for pos in range(bundle_size):
+            entry = self.q_s1s2.pop()
+            entry.bundle_id = bundle_id
+            entry.bundle_pos = pos
+            entry.bundle_size = bundle_size
+            self.q_s2s3.push(entry)
+        return True
+
+    def _try_execute_shakti(self) -> bool:
+        if not self.lockstep_bundles:
+            return self._try_execute_shakti_decoupled()
+        if self.redirect_this_cycle or self.q_s2s3.empty():
+            return False
+        first = self.q_s2s3.first()
+        if first.stale_frontend:
+            self.q_s2s3.pop()
+            return True
+
+        bundle = self._head_bundle(self.q_s2s3)
+        if not bundle:
+            return False
+        if self.q_s3s4.space() < len(bundle):
+            return False
+        if not self._bundle_fu_ready(bundle):
+            return False
+
+        for entry in bundle:
+            insn = entry.insn
+            if not self._operands_available(insn):
+                return False
+            frontend_penalty = self._frontend_redirect_penalty(entry)
+            if entry.frontend_waited_cycles < frontend_penalty:
+                entry.frontend_waited_cycles += 1
+                return False
+
+        issued_entries = [self.q_s2s3.pop() for _ in bundle]
+        for entry in issued_entries:
+            insn = entry.insn
+            self._reserve_issue_resource(insn)
+            entry.issued_cycle = self.cycle
+            self._lock_scoreboard(entry)
+            entry.result_ready_cycle = self._result_ready_cycle(insn)
+            entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
+            entry.bypass_ready_cycle = self.cycle
+            entry.wb_kind = self._initial_wb_kind(insn)
+            self.q_s3s4.push(entry)
+
+        for entry in issued_entries:
+            insn = entry.insn
+            if insn.is_control:
+                if entry.pred_mispredict:
+                    self.predictor.restore_after_mispredict(entry.pred_btb_hit, entry.pred_history)
+                    penalty = self.branch_mispredict_penalty + self._upper_half_32b_mispredict_extra(entry)
+                    self.flush_countdown = max(self.flush_countdown, penalty)
+                    if self.fetch_blocked_by == entry.trace.index:
+                        self.fetch_blocked_by = None
+                    self.stale_frontend_flushed = True
+                    self.redirect_this_cycle = True
+                self._schedule_predictor_training(entry)
+            if insn.is_div:
+                self.div_busy_until = self.cycle + self.div_latency
+            if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
+                self.flush_countdown = max(self.flush_countdown, self.wb_flush_penalty)
+                self.redirect_this_cycle = True
+        return True
+
+    def _try_execute_shakti_decoupled(self) -> bool:
+        if self.redirect_this_cycle or self.q_s2s3.empty():
+            return False
+        entry = self.q_s2s3.first()
+        if entry.stale_frontend:
+            self.q_s2s3.pop()
+            return True
+        if self.q_s3s4.full():
+            return False
+
+        insn = entry.insn
+        if not self._fu_ready(insn):
+            return False
+        if not self._operands_available(insn):
+            return False
+        frontend_penalty = self._frontend_redirect_penalty(entry)
+        if entry.frontend_waited_cycles < frontend_penalty:
+            entry.frontend_waited_cycles += 1
+            return False
+
+        entry = self.q_s2s3.pop()
+        self._reserve_issue_resource(insn)
+        entry.issued_cycle = self.cycle
+        self._lock_scoreboard(entry)
+        entry.result_ready_cycle = self._result_ready_cycle(insn)
+        entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
+        entry.bypass_ready_cycle = self.cycle
+        entry.wb_kind = self._initial_wb_kind(insn)
+        self.q_s3s4.push(entry)
+
+        if insn.is_control:
+            if entry.pred_mispredict:
+                self.predictor.restore_after_mispredict(entry.pred_btb_hit, entry.pred_history)
+                penalty = self.branch_mispredict_penalty + self._upper_half_32b_mispredict_extra(entry)
+                self.flush_countdown = max(self.flush_countdown, penalty)
+                if self.fetch_blocked_by == entry.trace.index:
+                    self.fetch_blocked_by = None
+                self.stale_frontend_flushed = True
+                self.redirect_this_cycle = True
+            self._schedule_predictor_training(entry)
+        if insn.is_div:
+            self.div_busy_until = self.cycle + self.div_latency
+        if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
+            self.flush_countdown = max(self.flush_countdown, self.wb_flush_penalty)
+            self.redirect_this_cycle = True
+        return True
+
+    def _try_stage4_shakti(self) -> bool:
+        if not self.lockstep_bundles:
+            return self._try_stage4_shakti_decoupled()
+        if self.q_s3s4.empty():
+            return False
+        first = self.q_s3s4.first()
+        if first.stale_frontend:
+            self.q_s3s4.pop()
+            return True
+
+        bundle = self._head_bundle(self.q_s3s4)
+        if not bundle:
+            return False
+        if self.q_s4s5.space() < len(bundle):
+            return False
+        if any(entry.result_ready_cycle > self.cycle for entry in bundle):
+            return False
+
+        moved_entries = [self.q_s3s4.pop() for _ in bundle]
+        for entry in moved_entries:
+            self._prepare_stage5_entry(entry)
+            self.q_s4s5.push(entry)
+        return True
+
+    def _try_stage4_shakti_decoupled(self) -> bool:
+        if self.q_s3s4.empty() or self.q_s4s5.full():
+            return False
+        entry = self.q_s3s4.first()
+        if entry.stale_frontend:
+            self.q_s3s4.pop()
+            return True
+        if entry.result_ready_cycle > self.cycle:
+            return False
+        entry = self.q_s3s4.pop()
+        self._prepare_stage5_entry(entry)
+        self.q_s4s5.push(entry)
+        return True
+
+    def _try_commit_shakti(self) -> bool:
+        if self.q_s4s5.empty():
+            return False
+        first = self.q_s4s5.first()
+        if first.stale_frontend:
+            self.q_s4s5.pop()
+            return True
+
+        bundle = self._head_bundle(self.q_s4s5)
+        if not bundle:
+            return False
+
+        committed_entries = [self.q_s4s5.pop() for _ in bundle]
+        for entry in committed_entries:
+            self._commit_entry(entry)
+        return True
+
+    def _head_bundle(self, queue: FixedQueue) -> list[PipeEntry]:
+        if queue.empty():
+            return []
+        first = queue.first()
+        if first.bundle_size <= 1 or first.bundle_id < 0:
+            return [first]
+        if len(queue) < first.bundle_size:
+            return []
+        bundle = [queue.peek(idx) for idx in range(first.bundle_size)]
+        if any(entry.bundle_id != first.bundle_id for entry in bundle):
+            return []
+        return bundle
+
+    def _prepare_stage5_entry(self, entry: PipeEntry) -> None:
+        entry.bypassable = entry.insn.writes_scoreboard
+        if entry.insn.is_load or entry.insn.is_mul or entry.insn.is_div or entry.insn.is_float:
+            entry.bypass_ready_cycle = self.cycle + 1
+        else:
+            entry.bypass_ready_cycle = self.cycle
+        entry.wb_kind = self._initial_wb_kind(entry.insn)
+
+    def _commit_entry(self, entry: PipeEntry) -> None:
+        if entry.stale_frontend:
+            return
+        if entry.insn.is_load and entry.rd_key is not None:
+            self.load_release_cycle[entry.rd_key] = self.cycle
+        self._release_scoreboard(entry)
+        if entry.wb_kind == "SYSTEM" and (entry.insn.is_csr or entry.insn.name == "xret"):
+            # CSR responses are normally single-cycle in this CSRBox, but the
+            # constructor keeps this explicit for architectural experiments.
+            pass
+        self.commits.append(self.cycle)
 
     def try_fetch(self, entries: list[TraceEntry]) -> bool:
         self._apply_pending_predictor_training()
         if self.fetch_index >= len(entries) or self.q_s0s1.full():
             return False
-        if self.flush_countdown > 0:
-            self.flush_countdown -= 1
+        if self._fetch_hold_active():
             return False
         if self.fetch_blocked_by is not None:
+            if self.wrong_path_frontend:
+                self.q_s0s1.push(self._make_stale_frontend_entry())
+                return True
             return False
 
         trace_entry = entries[self.fetch_index]
@@ -527,11 +873,42 @@ class Model:
                 pipe_entry.pred_ci,
                 pipe_entry.pred_mispredict,
             ) = self.predictor.predict(trace_entry)
+            self.control_events.append(
+                ControlEvent(
+                    local_index=self.fetch_index,
+                    trace_index=trace_entry.index,
+                    pc=trace_entry.pc,
+                    name=trace_entry.insn.name,
+                    predicted_next_pc=pipe_entry.predicted_next_pc,
+                    pred_state=pipe_entry.pred_state,
+                    pred_btb_hit=pipe_entry.pred_btb_hit,
+                    pred_history=pipe_entry.pred_history,
+                    pred_ci=pipe_entry.pred_ci,
+                    pred_mispredict=pipe_entry.pred_mispredict,
+                )
+            )
             if pipe_entry.pred_mispredict:
                 self.fetch_blocked_by = trace_entry.index
+                self.stale_frontend_flushed = False
         self.q_s0s1.push(pipe_entry)
         self.fetch_index += 1
         return True
+
+    def _make_stale_frontend_entry(self) -> PipeEntry:
+        return PipeEntry(self._stale_trace, stale_frontend=True)
+
+    def _fetch_hold_active(self) -> bool:
+        if self.fetch_hold_blocked_cycle == self.cycle:
+            return True
+        if self.flush_countdown > 0:
+            self.flush_countdown -= 1
+            self.fetch_hold_blocked_cycle = self.cycle
+            return True
+        if self.frontend_drop_fetch_hold > 0:
+            self.frontend_drop_fetch_hold -= 1
+            self.fetch_hold_blocked_cycle = self.cycle
+            return True
+        return False
 
     def _schedule_predictor_training(self, entry: PipeEntry) -> None:
         self.pending_predictor_training.append(
@@ -550,10 +927,92 @@ class Model:
             training = self.pending_predictor_training.popleft()
             self.predictor.train(training.trace, training.state, training.btbhit, training.history)
 
+    def _can_pair_shakti(self, first: Instruction, second: Instruction) -> bool:
+        return self._shakti_pair_decision(first, second)[0]
+
+    def _shakti_pair_decision(self, first: Instruction, second: Instruction) -> tuple[bool, str]:
+        first_kind = self._shakti_pair_kind(first)
+        second_kind = self._shakti_pair_kind(second)
+        pair_name = f"{first_kind}+{second_kind}"
+        if self._has_intra_bundle_raw(first, second):
+            return False, f"RAW:{pair_name}"
+        if first_kind in ("SYSTEM", "TRAP", "WFI", "OTHER") or second_kind in ("SYSTEM", "TRAP", "WFI", "OTHER"):
+            return False, pair_name
+        if first_kind == "ALU" and second_kind in ("ALU", "MULDIV", "FLOAT", "MEMORY", "CONTROL"):
+            return True, pair_name
+        if second_kind == "ALU" and first_kind in ("MULDIV", "FLOAT", "MEMORY", "CONTROL"):
+            return True, pair_name
+        if first_kind == "CONTROL" and second_kind in ("MULDIV", "FLOAT", "MEMORY"):
+            return True, pair_name
+        if second_kind == "CONTROL" and first_kind in ("MULDIV", "FLOAT", "MEMORY"):
+            return True, pair_name
+        if self.dual_mem and first_kind == "MEMORY" and second_kind == "MEMORY":
+            # The RTL's dual_mem block permits one load/store pair in either
+            # order. It is compiled out and unwired in the current branch.
+            return (first.is_store or second.is_store), pair_name
+        if self.allow_branch_branch and first_kind == "CONTROL" and second_kind == "CONTROL":
+            return True, pair_name
+        return False, pair_name
+
+    def _bundle_fu_ready(self, bundle: list[PipeEntry]) -> bool:
+        memory_count = self.memory_issues_this_cycle
+        control_count = self.control_issues_this_cycle
+        for entry in bundle:
+            insn = entry.insn
+            if insn.is_div and self.cycle < self.div_busy_until:
+                return False
+            if self._uses_memory_issue_resource(insn):
+                memory_count += 1
+                if memory_count > self.memory_issue_width:
+                    return False
+            if insn.is_control:
+                control_count += 1
+                if control_count > self.control_issue_width:
+                    return False
+        return True
+
+    def _has_intra_bundle_raw(self, first: Instruction, second: Instruction) -> bool:
+        if not first.writes_scoreboard:
+            return False
+        key = (first.rd_type, first.rd)
+        return key in second.source_regs()
+
+    def _shakti_pair_kind(self, insn: Instruction) -> str:
+        if insn.is_wfi:
+            return "WFI"
+        if insn.is_trap or insn.fu == "TRAP":
+            return "TRAP"
+        if insn.fu == "SYSTEM" or insn.is_csr:
+            return "SYSTEM"
+        if insn.is_control:
+            return "CONTROL"
+        if insn.is_load or insn.is_store or insn.is_atomic or insn.is_fence or insn.is_fence_i:
+            return "MEMORY"
+        if insn.is_mul or insn.is_div or insn.fu == "MULDIV":
+            return "MULDIV"
+        if insn.is_float or insn.fu == "FLOAT":
+            return "FLOAT"
+        if insn.fu == "ALU":
+            return "ALU"
+        return "OTHER"
+
     def _fu_ready(self, insn: Instruction) -> bool:
         if insn.is_div:
             return self.cycle >= self.div_busy_until
+        if self._uses_memory_issue_resource(insn) and self.memory_issues_this_cycle >= self.memory_issue_width:
+            return False
+        if insn.is_control and self.control_issues_this_cycle >= self.control_issue_width:
+            return False
         return True
+
+    def _reserve_issue_resource(self, insn: Instruction) -> None:
+        if self._uses_memory_issue_resource(insn):
+            self.memory_issues_this_cycle += 1
+        if insn.is_control:
+            self.control_issues_this_cycle += 1
+
+    def _uses_memory_issue_resource(self, insn: Instruction) -> bool:
+        return insn.is_load or insn.is_store or insn.is_atomic or insn.is_fence or insn.is_fence_i
 
     def _operands_available(self, insn: Instruction) -> bool:
         if self._store_data_waits_for_load_release(insn):
@@ -569,11 +1028,13 @@ class Model:
     def _bypass_available(self, key: tuple[str, int], locked_id: int) -> bool:
         sources = []
         if self.bypass_sources >= 1 and not self.q_s3s4.empty():
-            sources.append(self.q_s3s4.first())
+            sources.extend(self._bypass_entries(self.q_s3s4))
         if self.bypass_sources >= 2 and not self.q_s4s5.empty():
-            sources.append(self.q_s4s5.first())
+            sources.extend(self._bypass_entries(self.q_s4s5))
         for entry in sources:
             if not entry.bypassable:
+                continue
+            if entry.issued_cycle == self.cycle and not self.intra_bundle_forwarding:
                 continue
             if entry.bypass_ready_cycle > self.cycle:
                 continue
@@ -582,6 +1043,17 @@ class Model:
             if entry.scoreboard_id == locked_id:
                 return True
         return False
+
+    def _bypass_entries(self, queue: FixedQueue) -> list[PipeEntry]:
+        if self.dual_policy != "shakti":
+            return [queue.first()]
+        bundle = self._head_bundle(queue)
+        if len(bundle) == 2:
+            # RTL bypass priority within a source is slot1 before slot0. The
+            # scoreboard id disambiguates WAW cases, so timing only requires
+            # both lanes to be visible.
+            return [bundle[1], bundle[0]]
+        return bundle
 
     def _store_data_waits_for_load_release(self, insn: Instruction) -> bool:
         if self.load_to_store_data_release_penalty <= 0:
@@ -673,8 +1145,38 @@ def main() -> int:
     parser.add_argument("trace_files", nargs="+", help="RTL rtldump file(s), optionally cycle-stamped")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--limit", type=int, default=None, help="Only parse the first N committed instructions")
+    parser.add_argument("--trace-cache", default=".trace-cache", help="Directory for parsed trace cache")
+    parser.add_argument("--no-trace-cache", action="store_true", help="Disable parsed trace caching")
+    parser.add_argument("--predict-only", action="store_true", help="Skip RTL accuracy and delta comparison")
     parser.add_argument("--no-auto-window", action="store_true", help="Use the whole parsed trace instead of the app_log IPC window")
     parser.add_argument("--window", metavar="START:END", help="Use an explicit 0-based trace index window, END exclusive")
+    parser.add_argument("--dual-issue", action="store_true", help="Use the actual SHAKTI dual-issue prediction preset")
+    parser.add_argument("--generic-dual-issue", action="store_true", help="Use the older independent-lane two-wide experiment")
+    parser.add_argument("--fetch-width", type=int)
+    parser.add_argument("--fetch-decode-width", type=int)
+    parser.add_argument("--decode-width", type=int)
+    parser.add_argument("--issue-width", type=int)
+    parser.add_argument("--stage4-width", type=int)
+    parser.add_argument("--commit-width", type=int)
+    parser.add_argument("--memory-issue-width", type=int)
+    parser.add_argument("--control-issue-width", type=int)
+    parser.add_argument("--dual-mem", action="store_true", help="Allow the gated dual_mem memory pairing rule")
+    parser.add_argument(
+        "--decouple-lockstep",
+        action="store_true",
+        help="Experimental: let paired slots leave execute/stage4 independently while keeping atomic pair commit",
+    )
+    parser.add_argument(
+        "--allow-branch-branch",
+        action="store_true",
+        help="Experimental: allow CONTROL+CONTROL decode pairing; use with --control-issue-width 2",
+    )
+    parser.add_argument("--intra-bundle-forwarding", action="store_true")
+    parser.add_argument("--isb-s0s1", type=int)
+    parser.add_argument("--isb-s1s2", type=int)
+    parser.add_argument("--isb-s2s3", type=int)
+    parser.add_argument("--isb-s3s4", type=int)
+    parser.add_argument("--isb-s4s5", type=int)
     parser.add_argument("--mispredict-penalty", type=int, default=1)
     parser.add_argument("--load-hit-latency", type=int, default=1)
     parser.add_argument("--store-hit-latency", type=int, default=1)
@@ -683,13 +1185,29 @@ def main() -> int:
     parser.add_argument("--load-to-store-data-release-penalty", type=int, default=0)
     parser.add_argument("--mul-latency-adjust", type=int, default=0)
     parser.add_argument("--predictor-train-delay", type=int, default=1)
+    parser.add_argument(
+        "--wrong-path-frontend",
+        action="store_true",
+        help="Model stale wrong-path front-end packets before an execute-stage redirect resolves",
+    )
+    parser.add_argument(
+        "--stale-drop-fetch-penalty",
+        type=int,
+        default=1,
+        help="Fetch hold cycles after a stale s0/s1 wrong-path packet is dropped",
+    )
     parser.add_argument("--no-match-btb-hi", action="store_true")
     parser.add_argument("--no-bsv-hash-truncate", dest="bsv_hash_truncate", action="store_false")
+    parser.add_argument("--no-bpu", action="store_true", help="Disable modeled BPU/control redirect stalls for diagnostics")
     parser.set_defaults(bsv_hash_truncate=True)
     parser.add_argument("--show-discrepancies", type=int, default=12)
+    parser.add_argument("--show-control-discrepancies", type=int, default=0)
     args = parser.parse_args()
 
-    parsed_entries = parse_trace_files(args.trace_files, limit=args.limit)
+    if args.no_trace_cache:
+        parsed_entries = parse_trace_files(args.trace_files, limit=args.limit)
+    else:
+        parsed_entries = load_or_parse_trace_files(args.trace_files, cache_dir=args.trace_cache, limit=args.limit)
     entries = parsed_entries
     window: Optional[BenchmarkWindow] = None
     if args.window:
@@ -705,24 +1223,44 @@ def main() -> int:
             if window is not None:
                 entries = window.entries(parsed_entries)
 
-    model = Model.from_repo(
-        args.repo_root,
-        branch_mispredict_penalty=args.mispredict_penalty,
-        load_hit_latency=args.load_hit_latency,
-        store_hit_latency=args.store_hit_latency,
-        upper_half_32b_target_penalty=args.upper_half_32b_target_penalty,
-        upper_half_32b_mispredict_penalty=args.upper_half_32b_mispredict_penalty,
-        load_to_store_data_release_penalty=args.load_to_store_data_release_penalty,
-        mul_latency_adjust=args.mul_latency_adjust,
-        predictor_train_delay=args.predictor_train_delay,
-        match_btb_hi=not args.no_match_btb_hi,
-        bsv_hash_truncate=args.bsv_hash_truncate,
-    )
+    model = Model.from_repo(args.repo_root, **_model_overrides_from_args(args))
     cycles = model.run(entries)
-    result = compute_accuracy(entries, cycles)
+    result = None if args.predict_only else compute_accuracy(entries, cycles)
 
     total_cycles = cycles[-1] - cycles[0] + 1 if cycles else 0
     ipc = (len(entries) / total_cycles) if total_cycles else 0.0
+    if args.dual_issue or args.generic_dual_issue:
+        print("mode: dual_issue_prediction")
+        print(
+            "prediction_assumptions: "
+            f"policy={model.dual_policy} "
+            f"fetch={model.fetch_width} "
+            f"fetch_decode={model.fetch_decode_width} "
+            f"decode={model.decode_width} "
+            f"issue={model.issue_width} "
+            f"stage4={model.stage4_width} "
+            f"commit={model.commit_width} "
+            f"mem_issue={model.memory_issue_width} "
+            f"control_issue={model.control_issue_width} "
+            f"dual_mem={int(model.dual_mem)} "
+            f"lockstep={int(model.lockstep_bundles)} "
+            f"branch_branch={int(model.allow_branch_branch)} "
+            f"intra_bundle_forwarding={int(model.intra_bundle_forwarding)}"
+        )
+        if model.dual_pair_bundles or model.dual_single_bundles:
+            paired_insts = model.dual_pair_bundles * 2
+            issued_insts = paired_insts + model.dual_single_bundles
+            pair_rate = paired_insts / issued_insts if issued_insts else 0.0
+            print(
+                "decode_bundles: "
+                f"pairs={model.dual_pair_bundles} "
+                f"singles={model.dual_single_bundles} "
+                f"paired_instructions={pair_rate:.3%}"
+            )
+            if model.dual_pair_accept_counts:
+                print("accepted_pair_classes: " + _format_counter(model.dual_pair_accept_counts, limit=8))
+            if model.dual_pair_reject_counts:
+                print("rejected_pair_classes: " + _format_counter(model.dual_pair_reject_counts, limit=8))
     if window is not None:
         runs = f" runs={window.runs}" if window.runs is not None else ""
         print(
@@ -738,10 +1276,13 @@ def main() -> int:
     print(f"instructions: {len(entries)}")
     print(f"total_cycles: {total_cycles}")
     print(f"ipc: {ipc:.6f}")
-    if result.accuracy is None:
+    if result is None:
+        print("accuracy: skipped (predict-only)")
+    elif result.accuracy is None:
         print("accuracy: unavailable (trace has no cycle stamps)")
     else:
-        print(f"accuracy: {result.accuracy:.6%} ({result.matches}/{result.compared})")
+        label = "accuracy_vs_supplied_rtl" if args.dual_issue else "accuracy"
+        print(f"{label}: {result.accuracy:.6%} ({result.matches}/{result.compared})")
         if window is not None:
             app_delta = result.model_total_cycles - window.measured_cycles
             app_pct = (app_delta / window.measured_cycles * 100.0) if window.measured_cycles else 0.0
@@ -755,9 +1296,103 @@ def main() -> int:
         if result.mismatches and args.show_discrepancies:
             print()
             print(rank_discrepancies(entries, result.mismatches, limit=args.show_discrepancies))
+        if result.mismatches and args.show_control_discrepancies:
+            print()
+            print(
+                summarize_control_discrepancies(
+                    entries,
+                    result.mismatches,
+                    limit=args.show_control_discrepancies,
+                )
+            )
+    if result is None:
+        return 0
     if not has_cycle_stamps(entries):
         return 2
     return 0
+
+
+def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool | str]:
+    overrides: dict[str, int | bool | str] = {
+        "branch_mispredict_penalty": args.mispredict_penalty,
+        "load_hit_latency": args.load_hit_latency,
+        "store_hit_latency": args.store_hit_latency,
+        "upper_half_32b_target_penalty": args.upper_half_32b_target_penalty,
+        "upper_half_32b_mispredict_penalty": args.upper_half_32b_mispredict_penalty,
+        "load_to_store_data_release_penalty": args.load_to_store_data_release_penalty,
+        "mul_latency_adjust": args.mul_latency_adjust,
+        "predictor_train_delay": args.predictor_train_delay,
+        "wrong_path_frontend": args.wrong_path_frontend,
+        "stale_drop_fetch_penalty": args.stale_drop_fetch_penalty,
+        "match_btb_hi": not args.no_match_btb_hi,
+        "bsv_hash_truncate": args.bsv_hash_truncate,
+        "enable_bpu": not args.no_bpu,
+        "dual_mem": args.dual_mem,
+        "lockstep_bundles": not args.decouple_lockstep,
+        "allow_branch_branch": args.allow_branch_branch,
+        "intra_bundle_forwarding": args.intra_bundle_forwarding,
+    }
+    if args.dual_issue:
+        overrides.update(
+            {
+                "num_issue": 2,
+                "dual_policy": "shakti",
+                "fetch_width": 2,
+                "fetch_decode_width": 2,
+                "decode_width": 1,
+                "issue_width": 2 if args.decouple_lockstep else 1,
+                "stage4_width": 2 if args.decouple_lockstep else 1,
+                "commit_width": 1,
+                "memory_issue_width": 1,
+                "control_issue_width": 1,
+                "isb_s0s1": 4,
+                "isb_s1s2": 6,
+                "isb_s2s3": 2,
+                "isb_s3s4": 16,
+                "isb_s4s5": 16,
+                "dual_mem": args.dual_mem,
+                "lockstep_bundles": not args.decouple_lockstep,
+                "intra_bundle_forwarding": False,
+            }
+        )
+    elif args.generic_dual_issue:
+        overrides.update(
+            {
+                "num_issue": 2,
+                "dual_policy": "generic",
+                "fetch_width": 2,
+                "fetch_decode_width": 2,
+                "decode_width": 2,
+                "issue_width": 2,
+                "stage4_width": 2,
+                "commit_width": 2,
+                "memory_issue_width": 1,
+                "control_issue_width": 1,
+                "isb_s0s1": 4,
+                "isb_s1s2": 4,
+                "isb_s2s3": 2,
+            }
+        )
+
+    for arg_name, param_name in (
+        ("fetch_width", "fetch_width"),
+        ("fetch_decode_width", "fetch_decode_width"),
+        ("decode_width", "decode_width"),
+        ("issue_width", "issue_width"),
+        ("stage4_width", "stage4_width"),
+        ("commit_width", "commit_width"),
+        ("memory_issue_width", "memory_issue_width"),
+        ("control_issue_width", "control_issue_width"),
+        ("isb_s0s1", "isb_s0s1"),
+        ("isb_s1s2", "isb_s1s2"),
+        ("isb_s2s3", "isb_s2s3"),
+        ("isb_s3s4", "isb_s3s4"),
+        ("isb_s4s5", "isb_s4s5"),
+    ):
+        value = getattr(args, arg_name)
+        if value is not None:
+            overrides[param_name] = value
+    return overrides
 
 
 def _parse_window(value: str) -> tuple[int, int]:
@@ -770,6 +1405,15 @@ def _parse_window(value: str) -> tuple[int, int]:
     if start < 0 or end < start:
         raise ValueError("window must satisfy 0 <= START <= END")
     return start, end
+
+
+def _format_counter(counter: Counter[str], *, limit: int) -> str:
+    total = sum(counter.values())
+    parts = []
+    for name, count in counter.most_common(limit):
+        pct = (count / total * 100.0) if total else 0.0
+        parts.append(f"{name}={count}({pct:.1f}%)")
+    return ", ".join(parts)
 
 
 if __name__ == "__main__":

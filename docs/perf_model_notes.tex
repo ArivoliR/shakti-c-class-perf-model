@@ -1,0 +1,320 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{longtable}
+\usepackage{enumitem}
+
+\setlist[itemize]{leftmargin=1.5em}
+\setlist[enumerate]{leftmargin=1.5em}
+
+\title{SHAKTI C-Class Performance Model Notes}
+\author{perf-model}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Goal}
+
+The model is a Python cycle-level performance model for the single-issue SHAKTI
+C-Class RISC-V core. It follows the CVA6 performance-model methodology: simulate
+performance, not architectural behavior. The model consumes the dynamic
+instruction stream that the RTL actually committed, then predicts the commit
+cycle for each instruction.
+
+The current calibrated CoreMark result is:
+
+\begin{center}
+\begin{tabular}{|l|r|}
+\hline
+Metric & Value \\
+\hline
+CoreMark iterations & 40 \\
+RTL cycles from \texttt{app\_log} & 14,965,227 \\
+Model cycles & 14,854,777 \\
+Cycle delta & -110,450 (-0.738\%) \\
+Inter-commit delta accuracy & 99.233944\% \\
+Matched intervals & 12,666,565 / 12,764,347 \\
+\hline
+\end{tabular}
+\end{center}
+
+The held-out Dhrystone result after CoreMark calibration is 99.655836\%
+inter-commit delta accuracy, with model cycles 167,113 versus 167,827 RTL cycles.
+
+\section{RTL Trace Instrumentation}
+
+The original C-Class commit log did not include cycle numbers. Cycle accuracy
+requires a timestamp on each committed instruction, so a minimal testbench-only
+change was made to \texttt{test\_soc/c64\_c32/TbSoc.bsv}. The core datapath was
+not modified.
+
+Each commit line is emitted as:
+
+\begin{verbatim}
+cycle <cycle_count> core   0: ...
+\end{verbatim}
+
+This produces the RTL commit cycle for every dynamic instruction. Benchmark-level
+cycle and instruction counts were checked after instrumentation to confirm that
+the tracing change was non-perturbing.
+
+\section{Trace Parser}
+
+\texttt{trace.py} parses the RTL \texttt{rtldump} commit log into
+\texttt{TraceEntry} objects. Each entry records:
+
+\begin{itemize}
+  \item dynamic instruction index;
+  \item program counter;
+  \item instruction encoding;
+  \item RTL commit cycle;
+  \item privilege mode;
+  \item integer/floating register writes;
+  \item CSR writes;
+  \item memory addresses when present;
+  \item inferred actual next PC.
+\end{itemize}
+
+The actual next PC is inferred from the next committed instruction. That is enough
+to classify branches as taken or fallthrough without computing data values.
+
+\section{Timing Decoder}
+
+\texttt{isa.py} decodes RV64IMAFDC only far enough for timing. The model does not
+need to know that an add computes a sum, but it does need to know which registers
+are read and written, which functional unit is used, whether an instruction is a
+load, store, branch, jump, multiply, divide, CSR instruction, or trap, and whether
+the instruction is 16-bit compressed or 32-bit.
+
+For example, the timing metadata for a load must say:
+
+\begin{verbatim}
+reads x<base>
+writes x<rd>
+is_load = true
+functional unit = memory
+result is not immediately bypassable from execute
+\end{verbatim}
+
+This metadata drives scoreboard locking, RAW hazard checks, bypass decisions,
+functional-unit latency, and front-end control timing.
+
+Compressed decode was a concrete accuracy issue. RV64C integer doubleword
+instructions such as \texttt{c.ld}, \texttt{c.sd}, \texttt{c.ldsp}, and
+\texttt{c.sdsp} must not be confused with floating compressed memory operations
+such as \texttt{c.fld}, \texttt{c.fsd}, \texttt{c.fldsp}, and \texttt{c.fsdsp}.
+If an integer load is decoded as a floating load, the model locks the wrong
+register file and misses real integer RAW dependencies.
+
+Example:
+
+\begin{verbatim}
+c.ld   x10, 0(x8)
+addi   x11, x10, 1
+\end{verbatim}
+
+Correct decode sees a dependency from \texttt{x10} to the following
+\texttt{addi}. Incorrect decode as \texttt{c.fld} would mark the producer as
+writing \texttt{f10}, so the model would issue the \texttt{addi} too early.
+
+\section{Pipeline Model}
+
+The SHAKTI C-Class is not modeled as CVA6. The useful CVA6 lesson is the
+simulation methodology, not the microarchitecture. C-Class is strictly in-order
+and has six major stages:
+
+\begin{center}
+\begin{tabular}{|c|l|}
+\hline
+Stage & Role \\
+\hline
+0 & PC generation and branch prediction \\
+1 & instruction fetch response and compressed decompression \\
+2 & decode and register read \\
+3 & execute \\
+4 & memory and late execute routing \\
+5 & writeback, commit, CSR, and trap handling \\
+\hline
+\end{tabular}
+\end{center}
+
+The RTL uses inter-stage buffers (ISBs). Each stage fires when its input is not
+empty, its output is not full, and its local rule guards are true. This means
+backpressure is structural: a full downstream queue stalls the producer.
+
+The model represents ISBs as bounded queues:
+
+\begin{verbatim}
+q_s0s1, q_s1s2, q_s2s3, q_s3s4, q_s4s5
+\end{verbatim}
+
+Their depths are derived from \texttt{makefile.inc}, not guessed. This matters
+because changing an ISB depth changes when a local stall propagates backward
+through the front end.
+
+One model cycle executes stages in reverse order:
+
+\begin{verbatim}
+commit
+stage4
+execute
+decode
+fetch/decompress
+fetch
+\end{verbatim}
+
+This approximates synchronous hardware behavior. Downstream stages consume first,
+then upstream stages can observe freed queue space in the same modeled cycle. A
+forward-order software loop would create artificial stalls.
+
+\section{Modeled Hazards}
+
+The model explicitly includes:
+
+\begin{itemize}
+  \item structural hazards from full ISBs;
+  \item in-order issue and commit;
+  \item scoreboard register locks;
+  \item scoreboard release at commit;
+  \item bypass from the heads of the two later ISBs;
+  \item fixed load/store cache-hit latency;
+  \item multiplier and divider latency from \texttt{MULSTAGES\_TOTAL} and
+        \texttt{DIVSTAGES};
+  \item branch misprediction refill penalty;
+  \item CSR/trap/fence-style writeback flush penalty.
+\end{itemize}
+
+The scoreboard is modeled as a per-register lock array, matching C-Class rather
+than CVA6's out-of-order scoreboard FIFO. Destination registers are locked at
+execute and released at commit. With \texttt{no\_wawstalls}, the model tracks a
+small WAW identifier so a late release does not unlock a newer writer.
+
+\section{Branch Predictor}
+
+Most residual timing errors were control-flow related, so the branch predictor
+had to be modeled in detail. The predictor model includes:
+
+\begin{itemize}
+  \item BTB entries;
+  \item BHT saturating counters;
+  \item gshare global history;
+  \item return-address stack when RTL is built with \texttt{bpu\_ras};
+  \item compressed lower/upper halfword matching through the BTB \texttt{hi} bit;
+  \item delayed predictor training;
+  \item global-history restore after misprediction.
+\end{itemize}
+
+The largest CoreMark accuracy jumps came from:
+
+\begin{itemize}
+  \item fixing compressed integer memory decode;
+  \item matching BTB \texttt{hi} during prediction;
+  \item reproducing BSV hash width behavior for gshare;
+  \item applying predictor training one model cycle after execute;
+  \item deriving RAS enablement from \texttt{makefile.inc}.
+\end{itemize}
+
+The gshare hash fix was subtle. In BSV, shifting a \texttt{Bit\#(histbits)}
+value keeps that narrow width before widening. Python integers are unbounded, so
+the model had to explicitly mask the shifted history value to reproduce RTL
+indexing.
+
+\section{Accuracy Metric}
+
+The model uses the CVA6 inter-commit spacing metric. For dynamic instruction
+\(i\):
+
+\[
+\Delta t_{\mathrm{RTL}}(i) = t_{\mathrm{RTL}}(i) - t_{\mathrm{RTL}}(i-1)
+\]
+
+\[
+\Delta t_{\mathrm{model}}(i) = t_{\mathrm{model}}(i) - t_{\mathrm{model}}(i-1)
+\]
+
+\[
+\mathrm{accuracy} =
+\frac{|\{i : \Delta t_{\mathrm{model}}(i) =
+\Delta t_{\mathrm{RTL}}(i)\}|}{|\{i\}|}
+\]
+
+This metric does not let one early offset hide later local timing mistakes.
+
+\section{What Did Not Help}
+
+Several plausible fixes were tested and rejected:
+
+\begin{itemize}
+  \item disabling RAS reduced CoreMark accuracy to roughly 99.209439\%;
+  \item adding a global extra cycle to mispredicts reduced accuracy to 98.664530\%;
+  \item a coarse wrong-path front-end occupancy model also reduced accuracy to
+        98.664530\%.
+\end{itemize}
+
+These negative results show why the current model should not be tuned with broad
+constants. The remaining mismatches are conditional front-end/control effects.
+
+\section{Dual-Issue Prediction Mode}
+
+The dual-issue mode now models the actual SHAKTI dual-issue branch rather than
+an ideal independent-lane machine. The important parameters extracted from the
+dual branch are:
+
+\begin{itemize}
+  \item \texttt{num\_issue=2};
+  \item 64-bit fetch path;
+  \item \texttt{instr\_queue=6} for the stage1-to-stage2 MIMO queue, not the
+        apparent \texttt{isb\_s1s2=2};
+  \item one vector bundle slot for stage2-to-stage3, represented internally as
+        two scalar trace entries;
+  \item eight vector bundle slots for stage3-to-stage4 and stage4-to-stage5,
+        represented internally as sixteen scalar trace entries;
+  \item two ALUs;
+  \item one shared branch/control unit;
+  \item one memory issue path;
+  \item one mul/div path;
+  \item one FPU path;
+  \item no intra-bundle forwarding;
+  \item \texttt{dual\_mem} disabled and effectively unwired.
+\end{itemize}
+
+Pairing is not arbitrary. The model implements the stage2 whitelist:
+
+\begin{itemize}
+  \item ALU may pair with ALU, MULDIV, FLOAT, MEMORY, or CONTROL;
+  \item CONTROL may pair with MULDIV, FLOAT, or MEMORY;
+  \item MEM+MEM is disabled because \texttt{dual\_mem} is not compiled;
+  \item MULDIV+MULDIV, FLOAT+FLOAT, MEM+MULDIV, MEM+FLOAT,
+        MULDIV+FLOAT, BRANCH+BRANCH, and anything with SYSTEM/TRAP/WFI are
+        single-issued.
+\end{itemize}
+
+The model also implements the non-obvious pair hazards. Intra-bundle RAW from
+the first fetched instruction to the second fetched instruction blocks pairing.
+WAW and WAR pairs are allowed because \texttt{no\_wawstalls} is defined. Once a
+pair is formed, it advances in lockstep: if either slot's operands, functional
+unit, or stage4 result are not ready, neither slot advances. Stage5 commits the
+pair atomically, so both instructions receive the same predicted commit cycle.
+
+These dual-issue outputs are predictions, not validated accuracy results,
+because the current input trace is still the single-issue committed instruction
+stream. A dual RTL trace is needed before an inter-commit accuracy number can be
+reported for the dual branch.
+
+\section{Known Limitations}
+
+The model deliberately does not capture:
+
+\begin{itemize}
+  \item data-cache misses or cache conflicts;
+  \item instruction-cache misses;
+  \item data-dependent divider timing;
+  \item CSR/trap behavior requiring data values;
+  \item fully accurate wrong-path front-end queue occupancy after control
+        redirects.
+\end{itemize}
+
+\end{document}
