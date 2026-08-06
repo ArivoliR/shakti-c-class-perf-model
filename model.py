@@ -359,6 +359,7 @@ class Model:
     @classmethod
     def from_repo(cls, repo_root: str | Path, **overrides: int | bool) -> "Model":
         defines = parse_makefile_defines(Path(repo_root) / "makefile.inc")
+        rasdepth = int(defines.get("rasdepth", 8)) if bool(defines.get("bpu_ras", False)) else 0
         kwargs = {
             "isb_s0s1": int(defines.get("isb_s0s1", 2)),
             "isb_s1s2": int(defines.get("isb_s1s2", 2)),
@@ -373,7 +374,7 @@ class Model:
             "bhtdepth": int(defines.get("bhtdepth", 512)),
             "histlen": int(defines.get("histlen", 8)),
             "histbits": int(defines.get("histbits", 5)),
-            "rasdepth": int(defines.get("rasdepth", 8)),
+            "rasdepth": rasdepth,
             "enable_bpu": bool(defines.get("bpu", False)),
             "compressed": bool(defines.get("compressed", False)),
         }

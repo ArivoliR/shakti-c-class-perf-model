@@ -201,3 +201,21 @@ def test_bsv_hash_truncates_shifted_history_width_before_zero_extend():
 
     assert predictor._hash(history, 0) == 0b10000
     assert non_truncated._hash(history, 0) == 0b01010000
+
+
+def test_from_repo_disables_ras_when_bpu_ras_define_is_absent(tmp_path):
+    (tmp_path / "makefile.inc").write_text(
+        "BSC_DEFINES:=bpu gshare rasdepth=8 btbdepth=32 bhtdepth=512 histlen=8 histbits=5 compressed\n",
+        encoding="utf-8",
+    )
+
+    assert Model.from_repo(tmp_path).predictor.rasdepth == 0
+
+
+def test_from_repo_uses_rasdepth_when_bpu_ras_define_is_present(tmp_path):
+    (tmp_path / "makefile.inc").write_text(
+        "BSC_DEFINES:=bpu gshare rasdepth=8 bpu_ras btbdepth=32 bhtdepth=512 histlen=8 histbits=5 compressed\n",
+        encoding="utf-8",
+    )
+
+    assert Model.from_repo(tmp_path).predictor.rasdepth == 8

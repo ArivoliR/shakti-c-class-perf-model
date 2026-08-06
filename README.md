@@ -91,6 +91,16 @@ RTL app_log cycles: 167,827
 cycle delta: -714 (-0.425%)
 ```
 
+No-RAS apples-to-apples experiment, with `bpu_ras` removed from RTL and the
+model deriving `rasdepth=0` from `makefile.inc`:
+
+```text
+CoreMark accuracy: 99.209439%
+model cycles: 14,862,816
+RTL app_log cycles: 14,965,227
+cycle delta: -102,411 (-0.684%)
+```
+
 The main CoreMark accuracy jumps came from:
 
 - decoding RV64 compressed `c.ld/c.sd/c.ldsp/c.sdsp` separately from floating
@@ -121,7 +131,7 @@ This avoids hiding a persistent offset after one early mistake.
 - `MULSTAGES_TOTAL`, `DIVSTAGES`
 - predictor sizing: `btbdepth`, `bhtdepth`, `histlen`, `histbits`, `rasdepth`
 - `bypass_sources`, `wawid`
-- `bpu` and `compressed`
+- `bpu`, `bpu_ras`, and `compressed`
 
 The fixed hit latencies, flush penalties, and predictor timing switches are
 constructor parameters:
