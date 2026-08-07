@@ -14,6 +14,9 @@ architectural behavior: it never computes register values.
 - `accuracy.py`: CVA6-style inter-commit spacing accuracy metric and mismatch
   grouping.
 - `trace_cache.py`: compact parsed-trace cache for large benchmark dumps.
+- `experiment_configs.py`: named dual-issue experiment configurations.
+- `sweep.py`: runs the A-J dual-issue sweep and sensitivity runs.
+- `report.py`: renders `results/dual-issue-experiments.pdf` from sweep JSON.
 - `docs/perf_model_notes.tex`: LaTeX notes explaining the model construction.
 - `docs/perf_model_notes.pdf`: generated PDF copy of those notes.
 - `tests/`: unit tests for decode, trace parsing, and focused hazards.
@@ -217,6 +220,18 @@ dual branch unless the RTL is changed:
 Because the input trace is still the single-issue committed instruction stream,
 dual-issue outputs are predicted cycle counts and IPC, not cycle-accuracy
 validation results.
+
+Run the full experiment sweep and rebuild the Phase 3 report:
+
+```sh
+../.venv/bin/python3 sweep.py ../benchmarks/output/rtl.dump ../benchmarks/output/rtl1.dump \
+  --output results/dual_issue_sweep.json
+../.venv/bin/python3 report.py --input results/dual_issue_sweep.json
+```
+
+The report is written to `results/dual-issue-experiments.pdf`. The generator
+sets `TEXMFVAR` under `results/.texmf-var` so `pdflatex` does not need to write
+to the user's home directory.
 
 Current CoreMark dual prediction using the single-issue trace:
 

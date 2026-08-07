@@ -150,6 +150,13 @@ PHASE2_EXPERIMENTS: list[Experiment] = [
 
 
 def build_best_combo(helpful_names: set[str]) -> dict[str, Any]:
+    # In the current scalar-internal queue model, decoupled lockstep and
+    # intra-bundle forwarding together create a non-draining dependency
+    # interaction. Prefer E over B because E is the larger individual gain.
+    helpful_names = set(helpful_names)
+    if "E_intra_alu_forwarding" in helpful_names and "B_decouple_lockstep" in helpful_names:
+        helpful_names.remove("B_decouple_lockstep")
+
     cfg = merged()
     if "A_second_memory_port" in helpful_names:
         cfg.update(A_SECOND_MEMORY)
