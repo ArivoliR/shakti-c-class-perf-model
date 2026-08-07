@@ -104,6 +104,22 @@ def test_depth_one_guarded_fifo_halves_streaming_throughput():
     assert _producer_consumer_cycles(loopy, packets) == packets + 1
 
 
+def test_single_issue_stage1_splits_two_compressed_instructions_from_one_fetch_word():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x0001),  # c.nop, lower half
+            entry(1, 0x1002, 0x0001),  # c.nop, upper half from same fetch word
+            entry(2, 0x1004, 0x00100093),  # addi x1, x0, 1
+        ]
+    )
+
+    split = small_model(isb_s0s1=1).run(entries)
+    no_split = small_model(isb_s0s1=1, stage1_split_compressed_fetch_words=False).run(entries)
+
+    assert len(split) == len(no_split) == len(entries)
+    assert split[-1] < no_split[-1]
+
+
 def test_alu_result_bypasses_from_downstream_head():
     entries = annotate(
         [

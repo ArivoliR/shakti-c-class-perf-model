@@ -67,6 +67,7 @@ class PipeEntry:
     bundle_id: int = -1
     bundle_pos: int = 0
     bundle_size: int = 1
+    fetch_sibling: Optional[PipeEntry] = None
 
     @property
     def insn(self) -> Instruction:
@@ -413,6 +414,7 @@ class Model:
         stale_drop_fetch_penalty: int = 1,
         sized_fifo_allows_enq_after_deq_when_full: bool = False,
         lfifo_allows_enq_after_deq_when_full: bool = True,
+        stage1_split_compressed_fetch_words: bool = True,
     ) -> None:
         self.params = dict(locals())
         if dual_policy not in ("single", "generic", "shakti"):
@@ -483,6 +485,7 @@ class Model:
         self.relax_branch_next_pc_stall = relax_branch_next_pc_stall
         self.wrong_path_frontend = wrong_path_frontend
         self.stale_drop_fetch_penalty = stale_drop_fetch_penalty
+        self.stage1_split_compressed_fetch_words = stage1_split_compressed_fetch_words
         self.predictor = BranchPredictor(
             btbdepth=btbdepth,
             bhtdepth=bhtdepth,
@@ -498,10 +501,12 @@ class Model:
         self.scoreboard: dict[tuple[str, int], int] = {}
         self.next_wawid = 0
         self.fetch_index = 0
+        self.trace_len = 0
         self.commits: list[int] = []
         self.cycle = 0
         self.flush_countdown = 0
         self.fetch_blocked_by: Optional[int] = None
+        self.stage1_buffered_entry: Optional[PipeEntry] = None
         self.div_busy_until = 0
         self.load_release_cycle: dict[tuple[str, int], int] = {}
         self.pending_predictor_training: Deque[PredictorTraining] = deque()
@@ -567,6 +572,7 @@ class Model:
 
     def run(self, entries: list[TraceEntry]) -> list[int]:
         self._reset_runtime()
+        self.trace_len = len(entries)
         max_cycles = max(1000, len(entries) * 80 + 1000)
         while len(self.commits) < len(entries):
             if self.cycle > max_cycles:
@@ -652,10 +658,12 @@ class Model:
         self.scoreboard.clear()
         self.next_wawid = 0
         self.fetch_index = 0
+        self.trace_len = 0
         self.commits = []
         self.cycle = 0
         self.flush_countdown = 0
         self.fetch_blocked_by = None
+        self.stage1_buffered_entry = None
         self.div_busy_until = 0
         self.load_release_cycle.clear()
         self.pending_predictor_training.clear()
@@ -764,6 +772,22 @@ class Model:
         return True
 
     def try_fetch_decode(self) -> bool:
+        if self.stage1_buffered_entry is not None:
+            # stage1's compressed CheckPrev path can emit the buffered upper
+            # half without deq_response, but the rule guard still requires
+            # rx_fromstage0.u.notEmpty. That makes the next fetch packet a
+            # lookahead token even when it is not consumed this cycle.
+            if self.q_s0s1.empty() and self.fetch_index < self.trace_len:
+                return False
+            if self.q_s1s2.full():
+                return False
+            entry = self.stage1_buffered_entry
+            if entry.pred_mispredict:
+                self.fetch_blocked_by = entry.trace.index
+                self.stale_frontend_flushed = False
+            self.q_s1s2.push(entry)
+            self.stage1_buffered_entry = None
+            return True
         if self.q_s0s1.empty():
             return False
         if self.q_s0s1.first().stale_frontend and self.stale_frontend_flushed:
@@ -772,7 +796,10 @@ class Model:
             return True
         if self.q_s1s2.full():
             return False
-        self.q_s1s2.push(self.q_s0s1.pop())
+        entry = self.q_s0s1.pop()
+        self.q_s1s2.push(entry)
+        if entry.fetch_sibling is not None:
+            self.stage1_buffered_entry = entry.fetch_sibling
         return True
 
     def _try_decode_shakti(self) -> bool:
@@ -1030,11 +1057,31 @@ class Model:
                 return True
             return False
 
-        trace_entry = entries[self.fetch_index]
+        pipe_entry = self._make_pipe_entry(entries, self.fetch_index)
+        fetched = 1
+        if self._can_split_next_compressed_fetch_word(entries, self.fetch_index):
+            pipe_entry.fetch_sibling = self._make_pipe_entry(
+                entries,
+                self.fetch_index + 1,
+                defer_fetch_block=True,
+            )
+            fetched = 2
+        self.q_s0s1.push(pipe_entry)
+        self.fetch_index += fetched
+        return True
+
+    def _make_pipe_entry(
+        self,
+        entries: list[TraceEntry],
+        index: int,
+        *,
+        defer_fetch_block: bool = False,
+    ) -> PipeEntry:
+        trace_entry = entries[index]
         pipe_entry = PipeEntry(
             trace_entry,
-            prev_trace=entries[self.fetch_index - 1] if self.fetch_index > 0 else None,
-            next_trace=entries[self.fetch_index + 1] if self.fetch_index + 1 < len(entries) else None,
+            prev_trace=entries[index - 1] if index > 0 else None,
+            next_trace=entries[index + 1] if index + 1 < len(entries) else None,
         )
         if trace_entry.insn.is_control:
             (
@@ -1059,12 +1106,26 @@ class Model:
                     pred_mispredict=pipe_entry.pred_mispredict,
                 )
             )
-            if pipe_entry.pred_mispredict:
+            if pipe_entry.pred_mispredict and not defer_fetch_block:
                 self.fetch_blocked_by = trace_entry.index
                 self.stale_frontend_flushed = False
-        self.q_s0s1.push(pipe_entry)
-        self.fetch_index += 1
-        return True
+        return pipe_entry
+
+    def _can_split_next_compressed_fetch_word(self, entries: list[TraceEntry], index: int) -> bool:
+        if not self.stage1_split_compressed_fetch_words or self.num_issue != 1:
+            return False
+        if index + 1 >= len(entries):
+            return False
+        current = entries[index]
+        nxt = entries[index + 1]
+        return (
+            self.compressed
+            and current.insn.length == 2
+            and nxt.insn.length == 2
+            and (current.pc & 0x3) == 0
+            and nxt.pc == current.pc + 2
+            and (current.pc & ~0x3) == (nxt.pc & ~0x3)
+        )
 
     def _make_stale_frontend_entry(self) -> PipeEntry:
         return PipeEntry(self._stale_trace, stale_frontend=True)
