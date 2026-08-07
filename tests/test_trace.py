@@ -3,7 +3,14 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from trace import AppLogMetrics, detect_benchmark_window, parse_app_log_metrics, parse_trace_files, parse_trace_lines
+from trace import (
+    AppLogMetrics,
+    detect_benchmark_window,
+    parse_app_log_metrics,
+    parse_pmc_counters,
+    parse_trace_files,
+    parse_trace_lines,
+)
 
 
 def test_parse_legacy_trace_line():
@@ -43,6 +50,18 @@ def test_parse_app_log_metrics(tmp_path):
     assert metrics == AppLogMetrics(cycles=167827, instret=159518, runs=500)
 
 
+def test_parse_multiline_app_log_metrics(tmp_path):
+    app_log = tmp_path / "app_log"
+    app_log.write_text(
+        "IPC_MEASURE cycles : 10398758\nIPC_MEASURE instret: 12771408\nIterations       : 40\n",
+        encoding="utf-8",
+    )
+
+    metrics = parse_app_log_metrics(app_log)
+
+    assert metrics == AppLogMetrics(cycles=10398758, instret=12771408, runs=40)
+
+
 def test_parse_coremark_app_log_metrics(tmp_path):
     app_log = tmp_path / "app_log"
     app_log.write_text("Total ticks      : 14965227\nIterations       : 40\n", encoding="utf-8")
@@ -50,6 +69,26 @@ def test_parse_coremark_app_log_metrics(tmp_path):
     metrics = parse_app_log_metrics(app_log)
 
     assert metrics == AppLogMetrics(cycles=14965227, runs=40)
+
+
+def test_parse_pmc_counters(tmp_path):
+    app_log = tmp_path / "app_log"
+    app_log.write_text(
+        "PMC dual_issued      evt33: 57522\n"
+        "PMC mem+mem_hz       evt47: 22509\n"
+        "PMC mem_load+load    evt54: 6010\n"
+        "PMC mem_load+store   evt55: 6000\n"
+        "PMC mem_store+store  evt56: 10499\n",
+        encoding="utf-8",
+    )
+
+    counters = parse_pmc_counters(app_log)
+
+    assert counters["dual_issued"] == 57522
+    assert counters["mem_mem_hazard"] == 22509
+    assert counters["mem_mem_ll"] == 6010
+    assert counters["mem_mem_ls"] == 6000
+    assert counters["mem_mem_ss"] == 10499
 
 
 def test_detect_benchmark_window_from_csr_reads():

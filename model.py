@@ -103,9 +103,19 @@ class ControlEvent:
 
 
 class FixedQueue:
-    def __init__(self, capacity: int):
+    def __init__(
+        self,
+        capacity: int,
+        *,
+        allow_enq_after_deq_when_full: bool,
+    ):
         self.capacity = max(1, int(capacity))
         self.items: Deque[PipeEntry] = deque()
+        self.allow_enq_after_deq_when_full = allow_enq_after_deq_when_full
+        self._cycle_start_len = 0
+        self._enqueues_this_cycle = 0
+        self._dequeues_this_cycle = 0
+        self.max_occupancy = 0
 
     def __bool__(self) -> bool:
         return bool(self.items)
@@ -113,11 +123,39 @@ class FixedQueue:
     def __len__(self) -> int:
         return len(self.items)
 
+    def begin_cycle(self) -> None:
+        self._cycle_start_len = len(self.items)
+        self._enqueues_this_cycle = 0
+        self._dequeues_this_cycle = 0
+        self.max_occupancy = max(self.max_occupancy, len(self.items))
+
+    def clear(self) -> None:
+        self.items.clear()
+        self._cycle_start_len = 0
+        self._enqueues_this_cycle = 0
+        self._dequeues_this_cycle = 0
+        self.max_occupancy = 0
+
+    def can_push(self, count: int = 1) -> bool:
+        if count <= 0:
+            return True
+        if self.allow_enq_after_deq_when_full:
+            return len(self.items) + count <= self.capacity
+        return self._cycle_start_len + self._enqueues_this_cycle + count <= self.capacity
+
     def full(self) -> bool:
-        return len(self.items) >= self.capacity
+        return not self.can_push()
 
     def space(self) -> int:
-        return self.capacity - len(self.items)
+        if self.allow_enq_after_deq_when_full:
+            return max(0, self.capacity - len(self.items))
+        return max(0, self.capacity - self._cycle_start_len - self._enqueues_this_cycle)
+
+    def full_at_cycle_start(self) -> bool:
+        return self._cycle_start_len >= self.capacity
+
+    def occupancy_at_cycle_start(self) -> int:
+        return self._cycle_start_len
 
     def empty(self) -> bool:
         return not self.items
@@ -129,11 +167,14 @@ class FixedQueue:
         return self.items[index]
 
     def push(self, entry: PipeEntry) -> None:
-        if self.full():
+        if not self.can_push():
             raise RuntimeError("queue full")
         self.items.append(entry)
+        self._enqueues_this_cycle += 1
+        self.max_occupancy = max(self.max_occupancy, len(self.items))
 
     def pop(self) -> PipeEntry:
+        self._dequeues_this_cycle += 1
         return self.items.popleft()
 
 
@@ -150,6 +191,7 @@ class BranchPredictor:
         enabled: bool = True,
         match_btb_hi: bool = True,
         bsv_hash_truncate: bool = True,
+        static_not_taken_when_disabled: bool = True,
     ) -> None:
         self.btbdepth = btbdepth
         self.bhtdepth = bhtdepth
@@ -160,6 +202,7 @@ class BranchPredictor:
         self.enabled = enabled
         self.match_btb_hi = match_btb_hi
         self.bsv_hash_truncate = bsv_hash_truncate
+        self.static_not_taken_when_disabled = static_not_taken_when_disabled
         self.bhtcols = 2 if compressed else 1
         self.bht_rows = max(1, bhtdepth // self.bhtcols)
         self.bht = [[1 for _ in range(self.bht_rows)] for _ in range(self.bhtcols)]
@@ -172,7 +215,19 @@ class BranchPredictor:
         insn = entry.insn
         pc = entry.pc & ~0x3
         if not self.enabled:
-            return None, 1, False, self.ghr, "Branch", False
+            if not self.static_not_taken_when_disabled:
+                # Diagnostic mode (--no-bpu): suppress all modelled control
+                # stalls. Does not correspond to any buildable core.
+                return None, 1, False, self.ghr, "Branch", False
+            # A core built without `bpu` has no BTB/BHT/RAS: stage0 just walks
+            # sequentially, so every taken control transfer is resolved and
+            # redirected at execute.
+            fallthrough = insn.fallthrough_pc
+            actual_next = entry.actual_next_pc
+            mispredict = bool(
+                insn.is_control and actual_next is not None and actual_next != fallthrough
+            )
+            return fallthrough, 1, False, self.ghr, "Branch", mispredict
 
         idx = self._lookup(pc, hi=bool(entry.pc & 0x2) if self.compressed and self.match_btb_hi else None)
         state = 1
@@ -317,8 +372,8 @@ class Model:
         wawid: int = 4,
         mul_latency: int = 2,
         div_latency: int = 32,
-        load_hit_latency: int = 1,
-        store_hit_latency: int = 1,
+        load_hit_latency: int = 0,
+        store_hit_latency: int = 0,
         csr_latency: int = 1,
         branch_mispredict_penalty: int = 1,
         upper_half_32b_target_penalty: int = 1,
@@ -336,6 +391,7 @@ class Model:
         compressed: bool = True,
         match_btb_hi: bool = True,
         bsv_hash_truncate: bool = True,
+        static_not_taken_when_disabled: bool = True,
         fetch_width: int = 1,
         fetch_decode_width: int = 1,
         decode_width: int = 1,
@@ -351,19 +407,45 @@ class Model:
         allow_branch_branch: bool = False,
         symmetric_slots: bool = False,
         intra_bundle_forwarding: bool = False,
+        branch_next_pc_stall: bool = True,
+        relax_branch_next_pc_stall: bool = False,
         wrong_path_frontend: bool = False,
         stale_drop_fetch_penalty: int = 1,
+        sized_fifo_allows_enq_after_deq_when_full: bool = False,
+        lfifo_allows_enq_after_deq_when_full: bool = True,
     ) -> None:
         self.params = dict(locals())
         if dual_policy not in ("single", "generic", "shakti"):
             raise ValueError("dual_policy must be 'single', 'generic', or 'shakti'")
         if memory_pairing not in ("none", "store_involving", "all"):
             raise ValueError("memory_pairing must be 'none', 'store_involving', or 'all'")
-        self.q_s0s1 = FixedQueue(isb_s0s1)
-        self.q_s1s2 = FixedQueue(isb_s1s2)
-        self.q_s2s3 = FixedQueue(isb_s2s3)
-        self.q_s3s4 = FixedQueue(isb_s3s4)
-        self.q_s4s5 = FixedQueue(isb_s4s5)
+        self.q_s0s1 = FixedQueue(
+            isb_s0s1,
+            allow_enq_after_deq_when_full=sized_fifo_allows_enq_after_deq_when_full,
+        )
+        self.q_s1s2 = FixedQueue(
+            isb_s1s2,
+            allow_enq_after_deq_when_full=sized_fifo_allows_enq_after_deq_when_full,
+        )
+        self.q_s2s3 = FixedQueue(
+            isb_s2s3,
+            allow_enq_after_deq_when_full=lfifo_allows_enq_after_deq_when_full,
+        )
+        self.q_s3s4 = FixedQueue(
+            isb_s3s4,
+            allow_enq_after_deq_when_full=sized_fifo_allows_enq_after_deq_when_full,
+        )
+        self.q_s4s5 = FixedQueue(
+            isb_s4s5,
+            allow_enq_after_deq_when_full=sized_fifo_allows_enq_after_deq_when_full,
+        )
+        self._queues = {
+            "s0s1": self.q_s0s1,
+            "s1s2": self.q_s1s2,
+            "s2s3": self.q_s2s3,
+            "s3s4": self.q_s3s4,
+            "s4s5": self.q_s4s5,
+        }
         self.bypass_sources = bypass_sources
         self.wawid_mask = (1 << wawid) - 1
         self.mul_latency = mul_latency
@@ -379,6 +461,7 @@ class Model:
         self.predictor_train_delay = predictor_train_delay
         self.wb_flush_penalty = wb_flush_penalty
         self.compressed = compressed
+        self.enable_bpu = enable_bpu
         self.num_issue = num_issue
         self.dual_policy = dual_policy
         self.fetch_width = fetch_width
@@ -396,6 +479,8 @@ class Model:
         self.allow_branch_branch = allow_branch_branch
         self.symmetric_slots = symmetric_slots
         self.intra_bundle_forwarding = intra_bundle_forwarding
+        self.branch_next_pc_stall = branch_next_pc_stall
+        self.relax_branch_next_pc_stall = relax_branch_next_pc_stall
         self.wrong_path_frontend = wrong_path_frontend
         self.stale_drop_fetch_penalty = stale_drop_fetch_penalty
         self.predictor = BranchPredictor(
@@ -408,6 +493,7 @@ class Model:
             enabled=enable_bpu,
             match_btb_hi=match_btb_hi,
             bsv_hash_truncate=bsv_hash_truncate,
+            static_not_taken_when_disabled=static_not_taken_when_disabled,
         )
         self.scoreboard: dict[tuple[str, int], int] = {}
         self.next_wawid = 0
@@ -428,6 +514,7 @@ class Model:
         self.dual_single_bundles = 0
         self.dual_one_instr_bundles = 0
         self.stage3_stall_cycles = 0
+        self.queue_full_cycles: Counter[str] = Counter()
         self.dual_pair_accept_counts: Counter[str] = Counter()
         self.dual_pair_reject_counts: Counter[str] = Counter()
         self.memory_issues_this_cycle = 0
@@ -437,17 +524,29 @@ class Model:
 
     @classmethod
     def from_repo(cls, repo_root: str | Path, **overrides: int | bool | str) -> "Model":
-        defines = parse_makefile_defines(Path(repo_root) / "makefile.inc")
+        return cls.from_makefile(Path(repo_root) / "makefile.inc", **overrides)
+
+    @classmethod
+    def from_makefile(cls, makefile_inc: str | Path, **overrides: int | bool | str) -> "Model":
+        """Build a model from any makefile.inc, including an archived variant snapshot.
+
+        Used by the held-out design-point sweep, which needs one model per RTL
+        configuration without mutating the working tree.
+        """
+        defines = parse_makefile_defines(Path(makefile_inc))
         rasdepth = int(defines.get("rasdepth", 8)) if bool(defines.get("bpu_ras", False)) else 0
         num_issue = int(defines.get("num_issue", 1))
         s1s2_depth = int(defines.get("instr_queue", defines.get("isb_s1s2", 2))) if num_issue > 1 else int(
             defines.get("isb_s1s2", 2)
         )
+        # Single-issue pipe_ifcs.bsv wires s2->s3 with mkLFIFOF(), not
+        # mkSizedFIFOF(`isb_s2s3); the BSC define is inert on that path.
+        s2s3_depth = int(defines.get("isb_s2s3", 1)) if num_issue > 1 else 1
         kwargs = {
             "num_issue": num_issue,
             "isb_s0s1": int(defines.get("isb_s0s1", 2)),
             "isb_s1s2": s1s2_depth,
-            "isb_s2s3": int(defines.get("isb_s2s3", 1)),
+            "isb_s2s3": s2s3_depth,
             "isb_s3s4": int(defines.get("isb_s3s4", 8)),
             "isb_s4s5": int(defines.get("isb_s4s5", 8)),
             "bypass_sources": int(defines.get("bypass_sources", 2)),
@@ -529,6 +628,9 @@ class Model:
             else 0.0,
             "accepted_pair_classes": dict(self.dual_pair_accept_counts),
             "rejected_pair_classes": dict(self.dual_pair_reject_counts),
+            "queue_full_cycles": dict(self.queue_full_cycles),
+            "queue_max_occupancy": {name: queue.max_occupancy for name, queue in self._queues.items()},
+            "queue_capacity": {name: queue.capacity for name, queue in self._queues.items()},
         }
 
     @staticmethod
@@ -536,16 +638,17 @@ class Model:
         return sum(count for name, count in counter.items() if name.startswith(prefix))
 
     def _begin_cycle(self) -> None:
+        for name, queue in self._queues.items():
+            queue.begin_cycle()
+            if queue.full_at_cycle_start():
+                self.queue_full_cycles[name] += 1
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
         self.redirect_this_cycle = False
 
     def _reset_runtime(self) -> None:
-        self.q_s0s1.items.clear()
-        self.q_s1s2.items.clear()
-        self.q_s2s3.items.clear()
-        self.q_s3s4.items.clear()
-        self.q_s4s5.items.clear()
+        for queue in self._queues.values():
+            queue.clear()
         self.scoreboard.clear()
         self.next_wawid = 0
         self.fetch_index = 0
@@ -565,6 +668,7 @@ class Model:
         self.dual_single_bundles = 0
         self.dual_one_instr_bundles = 0
         self.stage3_stall_cycles = 0
+        self.queue_full_cycles.clear()
         self.dual_pair_accept_counts.clear()
         self.dual_pair_reject_counts.clear()
         self.memory_issues_this_cycle = 0
@@ -731,6 +835,8 @@ class Model:
             return False
         if not self._bundle_fu_ready(bundle):
             return False
+        if not self._branch_next_pc_ready(bundle):
+            return False
 
         for entry in bundle:
             insn = entry.insn
@@ -784,6 +890,8 @@ class Model:
 
         insn = entry.insn
         if not self._fu_ready(insn):
+            return False
+        if not self._branch_next_pc_ready([entry]):
             return False
         if not self._operands_available(insn):
             return False
@@ -1077,6 +1185,26 @@ class Model:
                     return False
         return True
 
+    def _branch_next_pc_ready(self, bundle: list[PipeEntry]) -> bool:
+        if not self.branch_next_pc_stall or not self.enable_bpu:
+            return True
+        controls = [entry for entry in bundle if entry.insn.is_control]
+        if not controls:
+            return True
+        if any(self.fetch_blocked_by == entry.trace.index for entry in controls):
+            return True
+        if not self.q_s1s2.empty():
+            return True
+        if self.relax_branch_next_pc_stall:
+            return all(self._control_successor_in_bundle(entry, bundle) for entry in controls)
+        return False
+
+    def _control_successor_in_bundle(self, entry: PipeEntry, bundle: list[PipeEntry]) -> bool:
+        actual_next = entry.trace.actual_next_pc
+        if actual_next is None:
+            return False
+        return any(other is not entry and other.trace.pc == actual_next for other in bundle)
+
     def _has_intra_bundle_raw(self, first: Instruction, second: Instruction) -> bool:
         if not first.writes_scoreboard:
             return False
@@ -1215,14 +1343,14 @@ class Model:
         key = entry.rd_key
         if key is None:
             return
-        if self.scoreboard.get(key) == entry.scoreboard_id:
+        if key in self.scoreboard and self.scoreboard.get(key) == entry.scoreboard_id:
             del self.scoreboard[key]
 
     def _result_ready_cycle(self, insn: Instruction) -> int:
         if insn.is_load or insn.is_atomic:
-            return self.cycle + self.load_hit_latency
+            return self.cycle + 1 + self.load_hit_latency
         if insn.is_store or insn.is_fence or insn.is_fence_i:
-            return self.cycle + self.store_hit_latency
+            return self.cycle + 1 + self.store_hit_latency
         if insn.is_mul:
             return self.cycle + self.mul_latency + self.mul_latency_adjust
         if insn.is_div:
@@ -1290,14 +1418,19 @@ def main() -> int:
     )
     parser.add_argument("--symmetric-slots", action="store_true", help="Experimental: relax slot-0-only scarce-FU pairing")
     parser.add_argument("--intra-bundle-forwarding", action="store_true")
+    parser.add_argument(
+        "--relax-branch-next-pc-stall",
+        action="store_true",
+        help="Experimental: do not require the decoded queue head when a control successor is already in the bundle",
+    )
     parser.add_argument("--isb-s0s1", type=int)
     parser.add_argument("--isb-s1s2", type=int)
     parser.add_argument("--isb-s2s3", type=int)
     parser.add_argument("--isb-s3s4", type=int)
     parser.add_argument("--isb-s4s5", type=int)
     parser.add_argument("--mispredict-penalty", type=int, default=1)
-    parser.add_argument("--load-hit-latency", type=int, default=1)
-    parser.add_argument("--store-hit-latency", type=int, default=1)
+    parser.add_argument("--load-hit-latency", type=int, default=0)
+    parser.add_argument("--store-hit-latency", type=int, default=0)
     parser.add_argument("--upper-half-32b-target-penalty", type=int, default=1)
     parser.add_argument("--upper-half-32b-mispredict-penalty", type=int, default=0)
     parser.add_argument("--load-to-store-data-release-penalty", type=int, default=0)
@@ -1462,6 +1595,10 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         "match_btb_hi": not args.no_match_btb_hi,
         "bsv_hash_truncate": args.bsv_hash_truncate,
         "enable_bpu": not args.no_bpu,
+        # --no-bpu stays a diagnostic that removes control stalls entirely.
+        # A core actually built without `bpu` is modelled by deriving
+        # enable_bpu from makefile.inc, which keeps static-not-taken behaviour.
+        "static_not_taken_when_disabled": False,
         "dual_mem": args.dual_mem,
         "memory_pairing": args.memory_pairing
         if args.memory_pairing is not None
@@ -1471,6 +1608,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         "allow_branch_branch": args.allow_branch_branch,
         "symmetric_slots": args.symmetric_slots,
         "intra_bundle_forwarding": args.intra_bundle_forwarding,
+        "relax_branch_next_pc_stall": args.relax_branch_next_pc_stall,
     }
     if args.dual_issue:
         overrides.update(

@@ -20,6 +20,10 @@ architectural behavior: it never computes register values.
 - `docs/perf_model_notes.tex`: LaTeX notes explaining the model construction.
 - `docs/perf_model_notes.pdf`: generated PDF copy of those notes.
 - `tests/`: unit tests for decode, trace parsing, and focused hazards.
+- `holdout/`: held-out RTL design-point sweep. Builds one real core per
+  `BSC_DEFINES` change and scores the model on predicted-vs-measured *deltas*,
+  which is what produces the error bar that has to accompany any architectural
+  prediction. See `holdout/README.md`; start with `holdout/sensitivity.py`.
 
 ## Regenerating A Cycle-Stamped Trace
 

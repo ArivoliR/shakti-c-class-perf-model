@@ -12,6 +12,7 @@ from typing import Any
 from accuracy import compute_accuracy
 from experiment_configs import (
     Experiment,
+    EXTRA_COMBINATIONS,
     PHASE2_EXPERIMENTS,
     build_best_combo,
     quad_from,
@@ -70,6 +71,7 @@ def main() -> int:
     parser.add_argument("--include-sensitivity", action="store_true", default=True)
     parser.add_argument("--skip-sensitivity", dest="include_sensitivity", action="store_false")
     parser.add_argument("--only", nargs="*", help="Run only experiment names containing any of these substrings")
+    parser.add_argument("--resume", action="store_true", help="Reuse completed results already present in --output")
     args = parser.parse_args()
 
     started = time.perf_counter()
@@ -87,65 +89,65 @@ def main() -> int:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    results: dict[str, Any] = {
-        "generated_at_unix": time.time(),
-        "trace_files": [str(Path(p).resolve()) for p in args.trace_files],
-        "trace": {
-            "parsed_entries": len(parsed_entries),
-            "window_entries": len(entries),
-            "window": _window_dict(window),
-            "limit": args.limit,
-            "note": (
-                "The local CoreMark trace window length differs from the supplied ground-truth "
-                "instruction count; aggregate comparisons use the supplied ground truth, while "
-                "model IPC uses the trace window length."
-            ),
-        },
-        "ground_truth": {
-            "coremark": COREMARK_GROUND_TRUTH,
-            "dhrystone": DHRYSTONE_GROUND_TRUTH,
-            "dhrystone_counter_reference": DHRYSTONE_COUNTER_REFERENCE,
-        },
-        "single_issue_validation": {},
-        "experiments": [],
-        "sensitivity": [],
-    }
+    if args.resume and output_path.exists():
+        results = json.loads(output_path.read_text(encoding="utf-8"))
+        results["resumed_at_unix"] = time.time()
+        results.setdefault("dual_issue_validation", {})
+        results.setdefault("single_issue_validation", {})
+        results.setdefault("experiments", [])
+        results.setdefault("extra_combinations", [])
+        results.setdefault("sensitivity", [])
+    else:
+        results = {
+            "generated_at_unix": time.time(),
+            "dual_issue_validation": {},
+            "single_issue_validation": {},
+            "experiments": [],
+            "extra_combinations": [],
+            "sensitivity": [],
+        }
 
-    print("running single-issue validation...", file=sys.stderr, flush=True)
-    single = Model.from_repo(args.repo_root)
-    single_cycles = single.run(entries)
-    single_total = _total_cycles(single_cycles)
-    single_accuracy = compute_accuracy(entries, single_cycles)
-    results["single_issue_validation"] = {
-        "instructions": len(entries),
-        "model_cycles": single_total,
-        "model_ipc": len(entries) / single_total if single_total else 0.0,
-        "dt_accuracy": single_accuracy.accuracy,
-        "dt_matches": single_accuracy.matches,
-        "dt_compared": single_accuracy.compared,
-        "rtl_trace_cycles": single_accuracy.rtl_total_cycles,
-        "cycle_error_vs_supplied_single": _pct_error(single_total, COREMARK_GROUND_TRUTH["single_cycles"]),
-        "cycle_error_vs_local_trace": _pct_error(single_total, single_accuracy.rtl_total_cycles)
-        if single_accuracy.rtl_total_cycles
-        else None,
+    results["trace_files"] = [str(Path(p).resolve()) for p in args.trace_files]
+    results["trace"] = {
+        "parsed_entries": len(parsed_entries),
+        "window_entries": len(entries),
+        "window": _window_dict(window),
+        "limit": args.limit,
+        "note": (
+            "The local CoreMark trace window length differs from the supplied ground-truth "
+            "instruction count; aggregate comparisons use the supplied ground truth, while "
+            "model IPC uses the trace window length."
+        ),
+    }
+    results["ground_truth"] = {
+        "coremark": COREMARK_GROUND_TRUTH,
+        "dhrystone": DHRYSTONE_GROUND_TRUTH,
+        "dhrystone_counter_reference": DHRYSTONE_COUNTER_REFERENCE,
     }
 
     phase2 = _filter(PHASE2_EXPERIMENTS, args.only)
     phase2_results = []
     baseline_ipc = 0.0
     baseline_cycles = 0
+    existing_phase2 = _by_name(results.get("experiments", []))
     for experiment in phase2:
-        result = _run_experiment(experiment, entries, args.repo_root)
+        result = existing_phase2.get(experiment.name)
+        if result is None:
+            result = _run_experiment(experiment, entries, args.repo_root)
+        else:
+            print(f"skipping {experiment.name} (resume)", file=sys.stderr, flush=True)
         if experiment.name == "0_baseline":
             baseline_ipc = result["model_ipc"]
             baseline_cycles = result["model_cycles"]
+            results["dual_issue_validation"] = _validation_dict(result)
         if baseline_ipc:
             result["delta_ipc_vs_baseline"] = result["model_ipc"] - baseline_ipc
             result["delta_ipc_pct_vs_baseline"] = result["delta_ipc_vs_baseline"] / baseline_ipc
             result["delta_cycles_vs_baseline"] = result["model_cycles"] - baseline_cycles
             result["verdict"] = _verdict(result["delta_ipc_pct_vs_baseline"])
         phase2_results.append(result)
-        _write_json(output_path, results | {"experiments": phase2_results})
+        results["experiments"] = phase2_results
+        _write_json(output_path, results)
     results["experiments"] = phase2_results
 
     if baseline_ipc:
@@ -155,44 +157,69 @@ def main() -> int:
             if result.get("delta_ipc_pct_vs_baseline", 0.0) > 0.002 and result["name"] != "0_baseline"
         }
         best_cfg = build_best_combo(helpful)
-        best = _run_experiment(
-            Experiment(
-                "I_best_combination",
-                "I: best combination",
-                "best",
-                best_cfg,
-                f"Stacked positive individual switches: {', '.join(sorted(helpful)) or 'none'}.",
-            ),
-            entries,
-            args.repo_root,
+        best_exp = Experiment(
+            "I_best_combination",
+            "I: best combination",
+            "best",
+            best_cfg,
+            f"Stacked positive individual switches: {', '.join(sorted(helpful)) or 'none'}.",
         )
+        existing_experiments = _by_name(results.get("experiments", []))
+        best = existing_experiments.get(best_exp.name)
+        if best is None:
+            best = _run_experiment(best_exp, entries, args.repo_root)
+        else:
+            print(f"skipping {best_exp.name} (resume)", file=sys.stderr, flush=True)
         best["delta_ipc_vs_baseline"] = best["model_ipc"] - baseline_ipc
         best["delta_ipc_pct_vs_baseline"] = best["delta_ipc_vs_baseline"] / baseline_ipc
         best["delta_cycles_vs_baseline"] = best["model_cycles"] - baseline_cycles
         best["verdict"] = _verdict(best["delta_ipc_pct_vs_baseline"])
-        results["experiments"].append(best)
+        _upsert_result(results["experiments"], best)
 
-        quad = _run_experiment(
-            Experiment(
-                "J_quad_issue",
-                "J: quad issue on best",
-                "quad",
-                quad_from(best_cfg),
-                "Approximate quad issue as two adjacent SHAKTI-style pairs per cycle.",
-            ),
-            entries,
-            args.repo_root,
+        quad_exp = Experiment(
+            "J_quad_issue",
+            "J: quad issue on best",
+            "quad",
+            quad_from(best_cfg),
+            "Approximate quad issue as two adjacent SHAKTI-style pairs per cycle.",
         )
+        existing_experiments = _by_name(results.get("experiments", []))
+        quad = existing_experiments.get(quad_exp.name)
+        if quad is None:
+            quad = _run_experiment(quad_exp, entries, args.repo_root)
+        else:
+            print(f"skipping {quad_exp.name} (resume)", file=sys.stderr, flush=True)
         quad["delta_ipc_vs_baseline"] = quad["model_ipc"] - baseline_ipc
         quad["delta_ipc_pct_vs_baseline"] = quad["delta_ipc_vs_baseline"] / baseline_ipc
         quad["delta_cycles_vs_baseline"] = quad["model_cycles"] - baseline_cycles
         quad["verdict"] = _verdict(quad["delta_ipc_pct_vs_baseline"])
-        results["experiments"].append(quad)
+        _upsert_result(results["experiments"], quad)
+
+        extra_results = []
+        existing_extra = _by_name(results.get("extra_combinations", []))
+        for experiment in _filter(EXTRA_COMBINATIONS, args.only):
+            result = existing_extra.get(experiment.name)
+            if result is None:
+                result = _run_experiment(experiment, entries, args.repo_root)
+            else:
+                print(f"skipping {experiment.name} (resume)", file=sys.stderr, flush=True)
+            result["delta_ipc_vs_baseline"] = result["model_ipc"] - baseline_ipc
+            result["delta_ipc_pct_vs_baseline"] = result["delta_ipc_vs_baseline"] / baseline_ipc
+            result["delta_cycles_vs_baseline"] = result["model_cycles"] - baseline_cycles
+            result["verdict"] = _verdict(result["delta_ipc_pct_vs_baseline"])
+            extra_results.append(result)
+            results["extra_combinations"] = extra_results
+            _write_json(output_path, results)
 
     if args.include_sensitivity:
         sensitivity_results = []
+        existing_sensitivity = _by_name(results.get("sensitivity", []))
         for experiment in _filter(sensitivity_experiments(), args.only):
-            result = _run_experiment(experiment, entries, args.repo_root)
+            result = existing_sensitivity.get(experiment.name)
+            if result is None:
+                result = _run_experiment(experiment, entries, args.repo_root)
+            else:
+                print(f"skipping {experiment.name} (resume)", file=sys.stderr, flush=True)
             if baseline_ipc:
                 result["delta_ipc_vs_baseline"] = result["model_ipc"] - baseline_ipc
                 result["delta_ipc_pct_vs_baseline"] = result["delta_ipc_vs_baseline"] / baseline_ipc
@@ -216,6 +243,7 @@ def _run_experiment(experiment: Experiment, entries: list[Any], repo_root: str |
     total_cycles = _total_cycles(cycles)
     ipc = len(entries) / total_cycles if total_cycles else 0.0
     profile = model.counter_profile(total_cycles)
+    accuracy = compute_accuracy(entries, cycles)
     return {
         "name": experiment.name,
         "label": experiment.label,
@@ -226,6 +254,11 @@ def _run_experiment(experiment: Experiment, entries: list[Any], repo_root: str |
         "model_ipc": ipc,
         "cycle_error_vs_dual_ground_truth": _pct_error(total_cycles, COREMARK_GROUND_TRUTH["dual_cycles"]),
         "ipc_error_vs_dual_ground_truth": _pct_error(ipc, COREMARK_GROUND_TRUTH["dual_ipc"]),
+        "dt_accuracy": accuracy.accuracy,
+        "dt_matches": accuracy.matches,
+        "dt_compared": accuracy.compared,
+        "rtl_trace_cycles": accuracy.rtl_total_cycles,
+        "cycle_error_vs_rtl_trace": _pct_error(total_cycles, accuracy.rtl_total_cycles),
         "profile": profile,
         "elapsed_seconds": time.perf_counter() - started,
     }
@@ -249,6 +282,21 @@ def _verdict(delta_pct: float) -> str:
     return "no effect"
 
 
+def _validation_dict(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "instructions": result["instructions"],
+        "model_cycles": result["model_cycles"],
+        "model_ipc": result["model_ipc"],
+        "dt_accuracy": result.get("dt_accuracy"),
+        "dt_matches": result.get("dt_matches"),
+        "dt_compared": result.get("dt_compared"),
+        "rtl_trace_cycles": result.get("rtl_trace_cycles"),
+        "cycle_error_vs_rtl_trace": result.get("cycle_error_vs_rtl_trace"),
+        "cycle_error_vs_dual_ground_truth": result.get("cycle_error_vs_dual_ground_truth"),
+        "ipc_error_vs_dual_ground_truth": result.get("ipc_error_vs_dual_ground_truth"),
+    }
+
+
 def _window_dict(window: BenchmarkWindow | None) -> dict[str, Any] | None:
     if window is None:
         return None
@@ -265,6 +313,18 @@ def _filter(experiments: list[Experiment], filters: list[str] | None) -> list[Ex
     if not filters:
         return experiments
     return [experiment for experiment in experiments if any(token in experiment.name for token in filters)]
+
+
+def _by_name(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {result["name"]: result for result in results}
+
+
+def _upsert_result(results: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    for idx, existing in enumerate(results):
+        if existing["name"] == result["name"]:
+            results[idx] = result
+            return
+    results.append(result)
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:

@@ -1,9 +1,11 @@
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from model import BranchPredictor, Model, PipeEntry
+from model import BranchPredictor, FixedQueue, Model, PipeEntry
 from trace import TraceEntry
 
 
@@ -26,7 +28,7 @@ def small_model(**kwargs):
         isb_s3s4=4,
         isb_s4s5=4,
         enable_bpu=False,
-        load_hit_latency=3,
+        load_hit_latency=2,
         mul_latency=4,
         div_latency=8,
     )
@@ -51,12 +53,55 @@ def dual_model(**kwargs):
         stage4_width=1,
         commit_width=1,
         memory_issue_width=1,
-        load_hit_latency=1,
+        load_hit_latency=0,
         mul_latency=4,
         div_latency=8,
     )
     params.update(kwargs)
     return Model(**params)
+
+
+def _fifo_packet(index):
+    return PipeEntry(entry(index, 0x1000 + 4 * index, 0x00100093))
+
+
+def _producer_consumer_cycles(queue: FixedQueue, packets: int) -> int:
+    produced = 0
+    consumed = 0
+    cycles = 0
+    while consumed < packets:
+        queue.begin_cycle()
+        if not queue.empty():
+            queue.pop()
+            consumed += 1
+        if produced < packets and not queue.full():
+            queue.push(_fifo_packet(produced))
+            produced += 1
+        cycles += 1
+    return cycles
+
+
+def test_guarded_depth_one_fifo_cannot_enqueue_after_same_cycle_dequeue_from_full():
+    queue = FixedQueue(1, allow_enq_after_deq_when_full=False)
+    queue.begin_cycle()
+    queue.push(_fifo_packet(0))
+
+    queue.begin_cycle()
+    assert queue.full_at_cycle_start()
+    queue.pop()
+    assert queue.empty()
+    assert queue.full()
+    with pytest.raises(RuntimeError):
+        queue.push(_fifo_packet(1))
+
+
+def test_depth_one_guarded_fifo_halves_streaming_throughput():
+    packets = 8
+    guarded = FixedQueue(1, allow_enq_after_deq_when_full=False)
+    loopy = FixedQueue(1, allow_enq_after_deq_when_full=True)
+
+    assert _producer_consumer_cycles(guarded, packets) == 2 * packets
+    assert _producer_consumer_cycles(loopy, packets) == packets + 1
 
 
 def test_alu_result_bypasses_from_downstream_head():
@@ -178,6 +223,16 @@ def test_shakti_dual_issue_pairing_whitelist_is_exact():
     assert not model._can_pair_shakti(alu, trap)
 
 
+def test_symmetric_slots_experiment_enables_non_alu_scarce_fu_pairs():
+    model = dual_model()
+    symmetric = dual_model(symmetric_slots=True)
+    store = entry(2, 0x1008, 0x00203023).insn
+    mul = entry(3, 0x100C, 0x023100B3).insn
+
+    assert not model._can_pair_shakti(store, mul)
+    assert symmetric._can_pair_shakti(store, mul)
+
+
 def test_shakti_pair_decision_reports_branch_branch():
     model = dual_model()
     branch = entry(0, 0x1000, 0x00000463).insn  # beq x0, x0, +8
@@ -216,7 +271,58 @@ def test_shakti_dual_issue_stage4_and_commit_are_atomic_for_pairs():
         ]
     )
 
-    assert dual_model(load_hit_latency=3).run(entries) == [7, 7]
+    assert dual_model(load_hit_latency=2).run(entries) == [7, 7]
+
+
+def test_independent_retire_can_commit_partial_pair_at_stage5():
+    atomic = dual_model()
+    independent = dual_model(atomic_pair_retire=False)
+    for model in (atomic, independent):
+        pipe_entry = PipeEntry(entry(0, 0x1000, 0x00100093))
+        pipe_entry.bundle_id = 3
+        pipe_entry.bundle_pos = 0
+        pipe_entry.bundle_size = 2
+        model.q_s4s5.push(pipe_entry)
+
+    assert not atomic.try_commit()
+    assert atomic.commits == []
+
+    assert independent.try_commit()
+    assert independent.commits == [0]
+
+
+def test_memory_latency_zero_and_one_are_distinct():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00003083),  # ld x1, 0(x0)
+            entry(1, 0x1004, 0x00108113),  # addi x2, x1, 1
+        ]
+    )
+
+    assert dual_model(load_hit_latency=0).run(entries) == [5, 7]
+    assert dual_model(load_hit_latency=1).run(entries) == [6, 8]
+
+
+def test_branch_next_pc_stall_can_be_relaxed_for_in_bundle_successor():
+    branch = PipeEntry(entry(0, 0x1000, 0x00209463))  # bne x1, x2, +8
+    successor = PipeEntry(entry(1, 0x1004, 0x00100113))  # addi x2, x0, 1
+    branch.trace.actual_next_pc = successor.trace.pc
+
+    baseline = dual_model(enable_bpu=True)
+    relaxed = dual_model(enable_bpu=True, relax_branch_next_pc_stall=True)
+    for model in (baseline, relaxed):
+        for pos, pipe_entry in enumerate((branch, successor)):
+            cloned = PipeEntry(pipe_entry.trace)
+            cloned.bundle_id = 13
+            cloned.bundle_pos = pos
+            cloned.bundle_size = 2
+            model.q_s2s3.push(cloned)
+
+    assert not baseline.try_execute()
+    assert len(baseline.q_s2s3) == 2
+
+    assert relaxed.try_execute()
+    assert len(relaxed.q_s3s4) == 2
 
 
 def test_decoupled_lockstep_experiment_can_issue_ready_older_slot():

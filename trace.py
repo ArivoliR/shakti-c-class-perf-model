@@ -21,12 +21,15 @@ REG_RE = re.compile(r"\s(?P<kind>[xf])(?P<reg>\d+)\s+0x(?P<value>[0-9a-fA-F]+)")
 CSR_RE = re.compile(r"\sc(?P<num>\d+)_([A-Za-z0-9_]+)\s+0x(?P<value>[0-9a-fA-F]+)")
 MEM_RE = re.compile(r"\smem\s+(?P<addr>0x[0-9a-fA-F]+)")
 APP_LOG_RE = re.compile(
-    r"IPC_MEASURE\s+cycles:\s+(?P<cycles>\d+)\s+"
-    r"instret:\s+(?P<instret>\d+)"
+    r"IPC_MEASURE\s+cycles\s*:\s+(?P<cycles>\d+)\s+"
+    r"(?:IPC_MEASURE\s+)?instret\s*:\s+(?P<instret>\d+)"
     r"(?:\s+runs:\s+(?P<runs>\d+))?"
 )
+APP_LOG_CYCLES_RE = re.compile(r"IPC_MEASURE\s+cycles\s*:\s+(?P<cycles>\d+)")
+APP_LOG_INSTRET_RE = re.compile(r"IPC_MEASURE\s+instret\s*:\s+(?P<instret>\d+)")
 COREMARK_TICKS_RE = re.compile(r"Total ticks\s+:\s+(?P<cycles>\d+)")
 COREMARK_ITERATIONS_RE = re.compile(r"Iterations\s+:\s+(?P<runs>\d+)")
+PMC_RE = re.compile(r"PMC\s+(?P<name>[A-Za-z0-9_+]+)\s+evt\s*(?P<event>\d+):\s+(?P<value>\d+)")
 CSR_MCYCLE = 0xB00
 CSR_MINSTRET = 0xB02
 
@@ -158,6 +161,15 @@ def parse_app_log_metrics(path: str | Path) -> Optional[AppLogMetrics]:
     text = app_log.read_text(encoding="utf-8", errors="replace")
     match = APP_LOG_RE.search(text)
     if not match:
+        cycles = APP_LOG_CYCLES_RE.search(text)
+        if cycles:
+            instret = APP_LOG_INSTRET_RE.search(text)
+            iterations = COREMARK_ITERATIONS_RE.search(text)
+            return AppLogMetrics(
+                cycles=int(cycles.group("cycles")),
+                instret=int(instret.group("instret")) if instret is not None else None,
+                runs=int(iterations.group("runs")) if iterations is not None else None,
+            )
         ticks = COREMARK_TICKS_RE.search(text)
         if not ticks:
             return None
@@ -166,11 +178,37 @@ def parse_app_log_metrics(path: str | Path) -> Optional[AppLogMetrics]:
             cycles=int(ticks.group("cycles")),
             runs=int(iterations.group("runs")) if iterations is not None else None,
         )
+    iterations = COREMARK_ITERATIONS_RE.search(text)
     return AppLogMetrics(
         cycles=int(match.group("cycles")),
         instret=int(match.group("instret")),
-        runs=int(match.group("runs")) if match.group("runs") is not None else None,
+        runs=int(match.group("runs"))
+        if match.group("runs") is not None
+        else int(iterations.group("runs"))
+        if iterations is not None
+        else None,
     )
+
+
+def parse_pmc_counters(path: str | Path) -> dict[str, int]:
+    app_log = Path(path)
+    if not app_log.exists():
+        return {}
+    counters: dict[str, int] = {}
+    text = app_log.read_text(encoding="utf-8", errors="replace")
+    for match in PMC_RE.finditer(text):
+        name = match.group("name").replace("+", "_")
+        counters[name] = int(match.group("value"))
+    aliases = {
+        "mem_mem_hz": "mem_mem_hazard",
+        "mem_load_load": "mem_mem_ll",
+        "mem_load_store": "mem_mem_ls",
+        "mem_store_store": "mem_mem_ss",
+    }
+    for source, target in aliases.items():
+        if source in counters:
+            counters[target] = counters[source]
+    return counters
 
 
 def detect_benchmark_window(entries: list[TraceEntry], metrics: AppLogMetrics) -> Optional[BenchmarkWindow]:

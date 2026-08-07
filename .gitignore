@@ -10,3 +10,8 @@ results/*.log
 results/*.out
 results/.texmf-var/
 results/missfont.log
+
+# held-out design-point sweep: build logs, simulators, and per-point RTL traces
+holdout/runs/
+holdout/sweep-*.log
+holdout/sensitivity.json

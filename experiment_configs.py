@@ -72,6 +72,10 @@ E_INTRA_ALU_FORWARDING = {
     "intra_bundle_forwarding": True,
 }
 
+F_RELAX_BRANCH_NEXT_PC = {
+    "relax_branch_next_pc_stall": True,
+}
+
 G_SYMMETRIC_SLOTS = {
     "symmetric_slots": True,
 }
@@ -80,6 +84,24 @@ H_SECOND_BRANCH = {
     "allow_branch_branch": True,
     "control_issue_width": 2,
 }
+
+
+EXTRA_COMBINATIONS: list[Experiment] = [
+    Experiment(
+        "combo_AE_memory_plus_intra_forwarding",
+        "A+E: memory + intra forwarding",
+        "probe",
+        merged(A_SECOND_MEMORY, E_INTRA_ALU_FORWARDING),
+        "Check whether the second memory port composes with intra-bundle ALU forwarding.",
+    ),
+    Experiment(
+        "combo_EH_intra_forwarding_plus_branch",
+        "E+H: intra forwarding + branch",
+        "probe",
+        merged(E_INTRA_ALU_FORWARDING, H_SECOND_BRANCH),
+        "Check whether branch+branch pairing is complementary with intra-bundle ALU forwarding.",
+    ),
+]
 
 
 PHASE2_EXPERIMENTS: list[Experiment] = [
@@ -129,8 +151,8 @@ PHASE2_EXPERIMENTS: list[Experiment] = [
         "F_relax_branch_next_pc",
         "F: relax branch next-PC stall",
         "frontend",
-        merged(),
-        "No-op in the current model: there is no separate queue-head next-PC stall beyond modeled BPU redirect timing.",
+        merged(F_RELAX_BRANCH_NEXT_PC),
+        "Allow a control bundle to execute without the queue-head next-PC when the actual successor is already in-bundle.",
     ),
     Experiment(
         "G_symmetric_slots",
@@ -166,6 +188,8 @@ def build_best_combo(helpful_names: set[str]) -> dict[str, Any]:
         cfg.update(D_INDEPENDENT_RETIRE)
     if "E_intra_alu_forwarding" in helpful_names:
         cfg.update(E_INTRA_ALU_FORWARDING)
+    if "F_relax_branch_next_pc" in helpful_names:
+        cfg.update(F_RELAX_BRANCH_NEXT_PC)
     if "G_symmetric_slots" in helpful_names:
         cfg.update(G_SYMMETRIC_SLOTS)
     if "H_second_branch_unit" in helpful_names:

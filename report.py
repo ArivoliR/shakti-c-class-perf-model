@@ -39,11 +39,11 @@ def main() -> int:
 def render(data: dict[str, Any]) -> str:
     coremark = data["ground_truth"]["coremark"]
     dhrystone = data["ground_truth"]["dhrystone"]
-    single = data["single_issue_validation"]
     experiments = data["experiments"]
     extra = data.get("extra_combinations", [])
     sensitivity = data["sensitivity"]
     baseline = experiments[0]
+    dual_validation = data.get("dual_issue_validation") or baseline
     best_dual = max([item for item in experiments + extra if item["name"] != "J_quad_issue"], key=lambda item: item["model_ipc"])
     quad = next((item for item in experiments if item["name"] == "J_quad_issue"), None)
 
@@ -66,20 +66,19 @@ def render(data: dict[str, Any]) -> str:
 \section*{{Executive Summary}}
 
 The delivered dual-issue SHAKTI model predicts {fmt_int(baseline['model_cycles'])}
-cycles and IPC {baseline['model_ipc']:.4f} on the available CoreMark trace
-window. The supplied clean dual RTL ground truth is {fmt_int(coremark['dual_cycles'])}
-cycles and IPC {coremark['dual_ipc']:.5f}, so the model is {pct(baseline['cycle_error_vs_dual_ground_truth'])}
-high in cycles on the aggregate check.
+cycles and IPC {baseline['model_ipc']:.4f} on the generated dual CoreMark
+trace window. The clean dual RTL ground truth is {fmt_int(coremark['dual_cycles'])}
+cycles and IPC {coremark['dual_ipc']:.5f}; the cycle-stamped run reproduced
+those app-log counters exactly, so the trace instrumentation is non-perturbing.
 
-\textbf{{Validation gate status: not fully passed.}} The single-issue model still
-has strong $\Delta t$ validation on the available stamped trace
-({pct(single['dt_accuracy'])}), but a cycle-stamped dual RTL trace was not
-available in the workspace. The local CoreMark trace window also contains
-{fmt_int(data['trace']['window_entries'])} instructions, while the supplied
-ground truth contains {fmt_int(coremark['instructions'])}. Therefore the dual
-experiments below are useful architectural predictions, but they carry the
-residual aggregate/model-input mismatch and are not yet a 97\%+ dual
-$\Delta t$ validation.
+\textbf{{Validation gate status: not passed.}} The dual baseline now has a real
+per-instruction $\Delta t$ comparison against RTL, not a proxy. Its accuracy is
+{pct(dual_validation.get('dt_accuracy'))}
+({fmt_int(dual_validation.get('dt_matches'))}/{fmt_int(dual_validation.get('dt_compared'))}
+matching inter-commit deltas), with aggregate cycle error
+{pct(baseline['cycle_error_vs_dual_ground_truth'])}. This is below the 97\%
+Phase-1 gate, so the architectural experiments below are useful directional
+signals but still carry the measured residual timing error.
 
 The most important result is that the second memory port alone helps only
 modestly in this model. Intra-bundle ALU forwarding is the largest individual
@@ -104,26 +103,24 @@ opportunity count is much smaller than the defective RTL event-52 story suggests
 \toprule
 Item & Value \\
 \midrule
-Single-issue $\Delta t$ accuracy on local CoreMark trace & {pct(single['dt_accuracy'])} \\
-Single-issue model cycles on local window & {fmt_int(single['model_cycles'])} \\
-Single-issue local RTL trace cycles & {fmt_int(single.get('rtl_trace_cycles'))} \\
-Single-issue cycle error vs local trace & {pct(single.get('cycle_error_vs_local_trace'))} \\
+Dual $\Delta t$ accuracy on generated CoreMark trace & {pct(dual_validation.get('dt_accuracy'))} \\
+Dual $\Delta t$ matches / compared & {fmt_int(dual_validation.get('dt_matches'))} / {fmt_int(dual_validation.get('dt_compared'))} \\
+Dual RTL commit-span cycles from trace & {fmt_int(dual_validation.get('rtl_trace_cycles'))} \\
 Dual baseline model cycles & {fmt_int(baseline['model_cycles'])} \\
 Dual clean RTL ground-truth cycles & {fmt_int(coremark['dual_cycles'])} \\
 Dual aggregate cycle error & {pct(baseline['cycle_error_vs_dual_ground_truth'])} \\
 Dual baseline model IPC & {baseline['model_ipc']:.5f} \\
 Dual clean RTL ground-truth IPC & {coremark['dual_ipc']:.5f} \\
-Held-out Dhrystone clean dual RTL IPC & {dhrystone['dual_ipc']:.2f} \\
+Held-out Dhrystone clean dual RTL IPC & {dhrystone['dual_ipc']:.2f} aggregate only \\
 \bottomrule
 \end{{tabular}}
 
 \paragraph{{Counter-profile validation.}}
-The model now emits the RTL-facing counters needed for validation, but the only
-available local dynamic trace is CoreMark. The prompt's counter reference is a
-Dhrystone dual-issue instrumented run, and no Dhrystone commit trace exists in
-the workspace. Comparing absolute CoreMark model counters to Dhrystone RTL
-counters would be misleading, so the mem+mem 5\% validation gate remains
-blocked pending a Dhrystone or dual CoreMark cycle-stamped commit trace.
+The model emits the RTL-facing counters needed for validation. The local
+cycle-stamped trace is CoreMark, while the supplied RTL counter profile is from
+an instrumented Dhrystone run. Absolute counter counts across those benchmarks
+are not a valid calibration target, so the mem+mem 5\% counter gate remains
+open until either CoreMark RTL counters or a Dhrystone commit trace are produced.
 
 The baseline CoreMark model counter profile is:
 
@@ -140,6 +137,16 @@ mem+mem 22,510 (LL 6,010, LS 6,000, SS 10,499), and mispredict 2,034.
 Change & Effect & Evidence \\
 \midrule
 \endhead
+Dual trace instrumentation & Added a testbench-only cycle counter to both
+dual commit-log slots; no core datapath files were changed. & The stamped
+CoreMark run reproduced the clean dual app-log counters exactly:
+{fmt_int(coremark['dual_cycles'])} cycles and {fmt_int(coremark['instructions'])}
+instructions. \\
+Multi-line \texttt{{app\_log}} parsing & Fixed parser support for SHAKTI logs
+that print \texttt{{IPC\_MEASURE cycles}} and \texttt{{IPC\_MEASURE instret}}
+on separate lines, including the space before the colon. & The selected
+benchmark window now has {fmt_int(data['trace']['window_entries'])}
+instructions, matching CoreMark ground truth. \\
 WAW/WAR pair handling & Kept WAW and WAR co-issue enabled because
 \texttt{{no\_wawstalls}} compiles out the checks. & Unit tests verify same-rd
 and write-after-read pairs commit together. \\
@@ -236,10 +243,12 @@ an optimistic adjacent-pair approximation, not a validated 4-wide front end.
 The model is a timing model over an already committed dynamic trace. It does not
 compute data values. It does not model data-cache misses, cache conflicts,
 instruction-cache misses, data-dependent divider timing, or CSR/trap behavior
-that depends on values. The dual validation lacks per-instruction RTL commit
-cycles, so aggregate IPC agreement can still hide local timing errors. A
-cycle-stamped dual RTL CoreMark trace and a Dhrystone commit trace are the next
-required artifacts.
+that depends on values. The dual CoreMark trace now provides per-instruction RTL
+commit cycles, but the baseline model only reaches the accuracy reported above;
+the residual mismatches are concentrated around multiply-heavy and control-flow
+neighborhoods and should be diagnosed before treating the experiment deltas as
+RTL-commitment evidence. A Dhrystone commit trace is still missing for held-out
+$\Delta t$ validation.
 
 \end{{document}}
 """
