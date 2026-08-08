@@ -92,7 +92,7 @@ def score(
                 "measured_pct": measured,
                 "predicted_pct": predicted,
                 "error_pp": error,
-                "relative_error": (error / abs(measured)) if abs(measured) > 1e-9 else None,
+                "relative_error": (error / abs(measured)) if abs(measured) >= 0.01 else None,
                 "delta_t_accuracy": point.get("delta_t_accuracy"),
             }
         )
@@ -324,8 +324,8 @@ def render_markdown(result: dict) -> str:
         "",
         "A dual-issue experiment predicting +X% is credible only if |X| is comfortably",
         f"above {_fmt(floor, '.2f')} pp and the mechanism it perturbs is represented among",
-        "the points above. Experiments touching a mechanism with no design point here",
-        "(notably backpressure and WAW stalls) carry no validated error bar at all.",
+        "the points above. Experiments touching a mechanism with no buildable design point here",
+        "(notably bypass/forwarding changes and WAW stalls) carry no validated error bar at all.",
         "",
     ]
     return "\n".join(lines)

@@ -319,13 +319,11 @@ UNBUILDABLE: dict[str, str] = {
 #: enough to survive an interrupted sweep.
 DEFAULT_ORDER = (
     "baseline",
-    "nobpu",
     "btb8",
     "bht128",
     "mul4",
     "btb16",
     "bht64",
-    "noras",
     "div16",
     "s3s4_1",
     "s3s4_2",

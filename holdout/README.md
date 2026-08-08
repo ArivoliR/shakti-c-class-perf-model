@@ -88,17 +88,16 @@ pre-flight on a 300k-instruction CoreMark prefix, before any RTL was built.
 
 | point | knob | mechanism | model predicts |
 |---|---|---|---:|
-| `nobpu` | `-bpu -gshare -bpu_ras` | control, entirely removed | +20.7% |
-| `byp1` | `bypass_sources=1` | forwarding network | +16.6% |
 | `mul4` | `MULSTAGES 2/2/4` | FU latency | +5.4% |
 | `btb8` | `btbdepth=8` | BTB capacity | +3.9% |
 | `bht64` | `bhtdepth=64` | direction prediction | +2.7% |
 | `btb16` | `btbdepth=16` | BTB capacity, half the perturbation | +1.5% |
 | `bht128` | `bhtdepth=128` | direction prediction, mild | +0.8% |
-| `s3s4_1` | `isb_s3s4=1` | backpressure | +0.09% |
-| `noras` | `-bpu_ras` | return-address stack | +0.06% |
+| `s3s4_1` | `isb_s3s4=1` | guarded FIFO backpressure | +78.6% |
+| `s0s1_1` | `isb_s0s1=1` | guarded FIFO backpressure | +73.5% |
+| `s1s2_1` | `isb_s1s2=1` | guarded FIFO backpressure | +75.0% |
+| `s4s5_1` | `isb_s4s5=1` | guarded FIFO backpressure | +72.4% |
 | `div16` | `DIVSTAGES=16` | FU latency | −0.005% |
-| `s0s1_1` | `isb_s0s1=1` | backpressure | 0.000% |
 
 `byp1` matters most for Experiment E (+6.1%, intra-bundle forwarding), which is
 the most credible dual-issue result and rests entirely on the bypass mechanism.
@@ -109,22 +108,24 @@ those claims can be quoted as numbers at all.
 `btb8`/`btb16` and `bht64`/`bht128` are deliberately paired: the same mechanism
 at two perturbation sizes, which tests linearity as well as accuracy.
 
-## Two findings the pre-flight already produced
+## Findings from the backpressure round
 
-**The model has no working backpressure mechanism.** Changing `isb_s0s1`,
-`isb_s1s2`, `isb_s2s3`, `isb_s4s5` or `isb_s3s4` (except to 1) moves the
-modelled cycle count by *exactly* zero. Instrumenting queue occupancy shows
-why: `q_s3s4` peaks at 2 entries against a capacity of 8 and `q_s4s5` peaks at
-1, so those capacities never bind. But `q_s0s1` and `q_s1s2` sit at full
-occupancy for roughly half of all cycles and halving their capacity still
-changes nothing, which capacity-never-binds does not explain.
+**The model now has guarded FIFO backpressure.** The missing mechanism was not
+capacity alone; it was FIFO scheduling. `mkSizedFIFOF` lowers to the guarded
+`SizedFIFO` primitive, where `FULL_N = not_ring_full`, so a producer does not
+see space created by a same-cycle dequeue. `mkLFIFOF` remains loopy. The model
+now records cycle-start occupancy and applies those two policies separately.
 
-So the README's claim that the model captures structural backpressure through
-bounded ISB queues is not currently supported. `s0s1_1` is in the sweep
-specifically to settle it: the model predicts exactly 0.000%, and the RTL will
-either confirm the null or expose a missing mechanism. This matters beyond the
-single-issue core, because the dual-issue configuration leans on depth-16
-bundle queues.
+This closed the large aggregate blind spots. On Dhrystone, `s3s4_1` is now
+322,593 model cycles versus 321,804 RTL, `s0s1_1` is 291,602 versus 294,842,
+`s1s2_1` is 320,099 versus 324,833, and `s4s5_1` is 319,045 versus 319,196.
+On CoreMark, the same large depth-1 slowdowns are predicted within a few
+percent. The remaining caveat is local cadence: Dhrystone Δt for `s0s1_1` and
+`s1s2_1` is still only about 67-68%, even though the aggregate deltas are close.
+
+**`isb_s2s3` is inert in the single-issue RTL.** The source path uses
+`mkLFIFOF()` for stage2→stage3 rather than `mkSizedFIFOF(isb_s2s3)`, so
+`s2s3_2` and `s2s3_4` are intentionally neutral in both RTL and model.
 
 **`enable_bpu=False` did not mean what the sweep needed it to mean.** It was a
 diagnostic that suppressed all modelled control stalls — with it set, the model
@@ -160,6 +161,12 @@ this way. It has to be reported as carrying no held-out validation. Recorded in
 no model parameter. Building it would produce a ground-truth delta with nothing
 to compare against. Recorded in `design_points.UNMODELLABLE`.
 
+**`bpu` and `bpu_ras` removal are not in the default sweep.** Removing
+`bpu_ras` unbalances predictor control flow in `gshare_fa.bsv`. Removing `bpu`
+hits conditional-compilation rot around `Stage3Meta.compressed`. These remain
+useful possible RTL cleanup tasks, but they are not treated as routine
+hold-out design points.
+
 ## The one RTL source change
 
 `src/ccore_types.bsv` declares `Stage3Meta.compressed` under `` `ifdef bpu ``
@@ -171,8 +178,8 @@ the struct.
 This is a conditional-compilation fix to a display function, not a datapath
 change: for every `bpu`-enabled configuration it compiles to exactly what it did
 before, which is why the baseline point still reproduces the reference cycle
-counts to the cycle. Without it the `nobpu` point — the largest lever available
-— could not be built at all.
+counts to the cycle. The no-BPU datapath itself still has additional upstream
+conditional-compilation issues, so it is excluded from the default sweep.
 
 ## Benchmarks
 

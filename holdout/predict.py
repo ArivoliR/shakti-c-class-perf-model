@@ -68,7 +68,8 @@ def predict_point(name: str, benchmark: str, coremark_trace: list[str] | None) -
         return {"name": name, "status": "no_trace"}
 
     entries = load_or_parse_trace_files(trace_files)
-    metrics = parse_app_log_metrics(point_dir / f"{benchmark}-app_log")
+    metrics_dir = RUNS / "baseline" if benchmark == "coremark" and coremark_trace else point_dir
+    metrics = parse_app_log_metrics(metrics_dir / f"{benchmark}-app_log")
     window = detect_benchmark_window(entries, metrics) if metrics else None
     if window is not None:
         entries = window.entries(entries)
@@ -83,12 +84,17 @@ def predict_point(name: str, benchmark: str, coremark_trace: list[str] | None) -
         k: v for k, v in model.params.items() if k != "self" and not isinstance(v, dict)
     }
 
-    if has_cycle_stamps(entries):
+    if has_cycle_stamps(entries) and (benchmark != "coremark" or name == "baseline"):
         accuracy = compute_accuracy(entries, cycles)
         if accuracy.accuracy is not None:
             record["delta_t_accuracy"] = accuracy.accuracy
             record["delta_t_matches"] = accuracy.matches
             record["delta_t_compared"] = accuracy.compared
+    elif benchmark == "coremark" and coremark_trace and name != "baseline":
+        record["delta_t_accuracy_note"] = (
+            "not computed: CoreMark variants use the baseline archived trace; "
+            "per-point CoreMark commit traces are not archived"
+        )
     return record
 
 

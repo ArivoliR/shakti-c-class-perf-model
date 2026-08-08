@@ -16,29 +16,33 @@
 
 \section*{Executive Summary}
 
-The delivered dual-issue SHAKTI model predicts 10,604,215
-cycles and IPC 1.2037 on the available CoreMark trace
-window. The supplied clean dual RTL ground truth is 10,398,758
-cycles and IPC 1.22817, so the model is 1.976\%
-high in cycles on the aggregate check.
+The current dual-issue SHAKTI model predicts 10,589,781
+cycles and IPC 1.2060 on the generated dual CoreMark
+trace window. The clean dual RTL ground truth is 10,398,758
+cycles and IPC 1.22817; the cycle-stamped run reproduced
+those app-log counters exactly, so the trace instrumentation is non-perturbing.
 
-\textbf{Validation gate status: not fully passed.} The single-issue model still
-has strong $\Delta t$ validation on the available stamped trace
-(99.234\%), but a cycle-stamped dual RTL trace was not
-available in the workspace. The local CoreMark trace window also contains
-12,764,348 instructions, while the supplied
-ground truth contains 12,771,408. Therefore the dual
-experiments below are useful architectural predictions, but they carry the
-residual aggregate/model-input mismatch and are not yet a 97\%+ dual
-$\Delta t$ validation.
+\textbf{Validation gate status: not passed.} The dual baseline now has a real
+per-instruction $\Delta t$ comparison against RTL, not a proxy. Its accuracy is
+93.302\%
+(11,915,999/12,771,407
+matching inter-commit deltas), with aggregate cycle error
+1.837\%. This is below the 97\%
+Phase-1 gate, so the architectural experiments below are useful directional
+signals but still carry the measured residual timing error.
 
-The most important result is that the second memory port alone helps only
-modestly in this model. Intra-bundle ALU forwarding is the largest individual
-gain. The best draining two-issue combination found is E+H: intra forwarding + branch,
-with IPC 1.2915
-(+7.292\%
-versus baseline). The quad approximation is separate and reaches IPC
-1.4196. The model-owned branch+branch
+The backpressure blind spot that motivated this round is fixed for aggregate
+cycle deltas: the depth-1 s3/s4, s0/s1, s1/s2, and s4/s5 RTL slowdowns are now
+predicted within a few percent. However, local $\Delta t$ cadence is still weak
+for the front-end depth-1 Dhrystone points, so this is not a full mechanism-level
+closure.
+
+The second memory port alone helps only modestly in this model:
++0.698\%. Intra-bundle ALU forwarding is
+the largest individual gain. The best draining two-issue combination found is
+E+H: intra forwarding + branch, with IPC 1.2953
+(+7.406\%
+versus baseline). The quad approximation did not complete/drain in the full-trace sweep and is reported as not completed, not as a measured null. The model-owned branch+branch
 opportunity count is much smaller than the defective RTL event-52 story suggests.
 
 \section*{Experiment Summary}
@@ -48,17 +52,17 @@ opportunity count is much smaller than the defective RTL event-52 story suggests
 Experiment & Cycles & IPC & $\Delta$ IPC & $\Delta$ & Verdict \\
 \midrule
 \endhead
-Baseline & 10,604,215 & 1.2037 & +0.0000 & +0.000\% & no effect \\
-A: second memory port & 10,524,390 & 1.2128 & +0.0091 & +0.758\% & helped \\
-B: decouple lockstep & 10,482,209 & 1.2177 & +0.0140 & +1.164\% & helped \\
-C: A+B & 10,440,944 & 1.2225 & +0.0188 & +1.564\% & helped \\
-D: independent retire & 10,604,215 & 1.2037 & +0.0000 & +0.000\% & no effect \\
-E: intra-bundle ALU forwarding & 9,993,129 & 1.2773 & +0.0736 & +6.115\% & helped \\
-F: relax branch next-PC stall & 10,604,215 & 1.2037 & +0.0000 & +0.000\% & no effect \\
-G: symmetric slots & 10,604,215 & 1.2037 & +0.0000 & +0.000\% & no effect \\
-H: second branch unit & 10,554,246 & 1.2094 & +0.0057 & +0.473\% & helped \\
-I: best combination & 10,037,159 & 1.2717 & +0.0680 & +5.650\% & helped \\
-J: quad issue on best & 8,991,805 & 1.4196 & +0.2158 & +17.932\% & helped \\
+Baseline & 10,589,781 & 1.2060 & +0.0000 & +0.000\% & no effect \\
+A: second memory port & 10,516,356 & 1.2144 & +0.0084 & +0.698\% & helped \\
+B: decouple lockstep & 10,517,329 & 1.2143 & +0.0083 & +0.689\% & helped \\
+C: A+B & 10,483,424 & 1.2182 & +0.0122 & +1.015\% & helped \\
+D: independent retire & 10,589,781 & 1.2060 & +0.0000 & +0.000\% & no effect \\
+E: intra-bundle ALU forwarding & 9,968,077 & 1.2812 & +0.0752 & +6.237\% & helped \\
+F: relax branch next-PC stall & 10,589,781 & 1.2060 & +0.0000 & +0.000\% & no effect \\
+G: symmetric slots & 10,589,781 & 1.2060 & +0.0000 & +0.000\% & no effect \\
+H: second branch unit & 10,539,244 & 1.2118 & +0.0058 & +0.480\% & helped \\
+I: best combination & 10,011,897 & 1.2756 & +0.0696 & +5.772\% & helped \\
+J: quad issue on best & n/a & n/a & n/a & n/a & not completed \\
 \bottomrule
 \end{longtable}
 
@@ -69,8 +73,8 @@ J: quad issue on best & 8,991,805 & 1.4196 & +0.2158 & +17.932\% & helped \\
 Experiment & Cycles & IPC & $\Delta$ IPC & $\Delta$ & Verdict \\
 \midrule
 \endhead
-A+E: memory + intra forwarding & 10,146,981 & 1.2579 & +0.0542 & +4.506\% & helped \\
-E+H: intra forwarding + branch & 9,883,469 & 1.2915 & +0.0878 & +7.292\% & helped \\
+A+E: memory + intra forwarding & 10,120,648 & 1.2619 & +0.0559 & +4.635\% & helped \\
+E+H: intra forwarding + branch & 9,859,557 & 1.2953 & +0.0893 & +7.406\% & helped \\
 \bottomrule
 \end{longtable}
 
@@ -80,26 +84,24 @@ E+H: intra forwarding + branch & 9,883,469 & 1.2915 & +0.0878 & +7.292\% & helpe
 \toprule
 Item & Value \\
 \midrule
-Single-issue $\Delta t$ accuracy on local CoreMark trace & 99.234\% \\
-Single-issue model cycles on local window & 14,854,777 \\
-Single-issue local RTL trace cycles & 14,965,228 \\
-Single-issue cycle error vs local trace & -0.738\% \\
-Dual baseline model cycles & 10,604,215 \\
+Dual $\Delta t$ accuracy on generated CoreMark trace & 93.302\% \\
+Dual $\Delta t$ matches / compared & 11,915,999 / 12,771,407 \\
+Dual RTL commit-span cycles from trace & 10,398,784 \\
+Dual baseline model cycles & 10,589,781 \\
 Dual clean RTL ground-truth cycles & 10,398,758 \\
-Dual aggregate cycle error & 1.976\% \\
-Dual baseline model IPC & 1.20371 \\
+Dual aggregate cycle error & 1.837\% \\
+Dual baseline model IPC & 1.20601 \\
 Dual clean RTL ground-truth IPC & 1.22817 \\
-Held-out Dhrystone clean dual RTL IPC & 1.33 \\
+Held-out Dhrystone clean dual RTL IPC & 1.33 aggregate only \\
 \bottomrule
 \end{tabular}
 
 \paragraph{Counter-profile validation.}
-The model now emits the RTL-facing counters needed for validation, but the only
-available local dynamic trace is CoreMark. The prompt's counter reference is a
-Dhrystone dual-issue instrumented run, and no Dhrystone commit trace exists in
-the workspace. Comparing absolute CoreMark model counters to Dhrystone RTL
-counters would be misleading, so the mem+mem 5\% validation gate remains
-blocked pending a Dhrystone or dual CoreMark cycle-stamped commit trace.
+The model emits the RTL-facing counters needed for validation. The local
+cycle-stamped trace is CoreMark, while the supplied RTL counter profile is from
+an instrumented Dhrystone run. Absolute counter counts across those benchmarks
+are not a valid calibration target, so the mem+mem 5\% counter gate remains
+open until either CoreMark RTL counters or a Dhrystone commit trace are produced.
 
 The baseline CoreMark model counter profile is:
 
@@ -107,20 +109,69 @@ The baseline CoreMark model counter profile is:
 \toprule
 Counter & Model value \\
 \midrule
-dual\_issued & 4,864,962 (45.878\% of cycles) \\
-raw\_hazard & 1,983,094 \\
-one\_instr & 149,500 \\
-st3\_not\_firing & 2,070,236 \\
-mem\_mem\_hazard & 738,993 \\
-mem LL / LS / SS & 447,048 / 284,784 / 7,161 \\
-branch+branch opportunities & 162,837 \\
-mispredict & 211,531 \\
+dual\_issued & 4,855,836 (45.854\% of cycles) \\
+raw\_hazard & 2,020,130 \\
+one\_instr & 149,723 \\
+st3\_not\_firing & 2,022,438 \\
+mem\_mem\_hazard & 729,996 \\
+mem LL / LS / SS & 448,270 / 274,725 / 7,001 \\
+branch+branch opportunities & 159,885 \\
+mispredict & 217,257 \\
 \bottomrule
 \end{tabular}
 
 For reference, the supplied Dhrystone RTL profile was: dual-issued about 50\%
 of cycles, RAW 12,051, one-instruction fetch 4,026, stage3 not firing 4,864,
 mem+mem 22,510 (LL 6,010, LS 6,000, SS 10,499), and mispredict 2,034.
+
+\subsection*{Held-Out Design-Point Validation}
+
+
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Benchmark & Baseline error & Baseline $\Delta t$ & Overall floor & Small-effect floor \\
+\midrule
+Dhrystone & -0.427\% & 99.655\% & 3.14 pp & 0.17 pp \\
+CoreMark & -0.790\% & 99.150\% & 1.46 pp & 0.64 pp \\
+\bottomrule
+\end{tabular}
+
+Dhrystone keeps the original held-out baseline accuracy target. CoreMark
+baseline $\Delta t$ is 99.150\%, slightly below
+the requested 99.2\% target, while aggregate cycle error remains within 1\%.
+Variant CoreMark $\Delta t$ is not reported because only the baseline CoreMark
+commit trace is archived; CoreMark variant rows are aggregate delta checks.
+
+
+\paragraph{Dhrystone key backpressure points.}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Point & Measured & Predicted & Error & $\Delta t$ \\
+\midrule
+\texttt{s3s4\_1} & +91.75\% & +93.04\% & +1.29 pp & 98.40\% \\
+\texttt{s0s1\_1} & +75.68\% & +74.50\% & -1.19 pp & 67.39\% \\
+\texttt{s1s2\_1} & +93.55\% & +91.55\% & -2.00 pp & 68.01\% \\
+\texttt{s4s5\_1} & +90.19\% & +90.92\% & +0.72 pp & 99.98\% \\
+\texttt{s3s4\_2} & +0.00\% & +0.00\% & -0.00 pp & 99.65\% \\
+\texttt{s0s1\_3} & +0.01\% & +0.00\% & -0.01 pp & 99.65\% \\
+\texttt{s1s2\_3} & -0.30\% & +0.00\% & +0.30 pp & 99.34\% \\
+\bottomrule
+\end{tabular}
+
+\paragraph{Coremark key backpressure points.}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Point & Measured & Predicted & Error & $\Delta t$ \\
+\midrule
+\texttt{s3s4\_1} & +77.62\% & +77.97\% & +0.35 pp & -- \\
+\texttt{s0s1\_1} & +72.86\% & +73.21\% & +0.36 pp & -- \\
+\texttt{s1s2\_1} & +77.29\% & +74.63\% & -2.66 pp & -- \\
+\texttt{s4s5\_1} & +71.48\% & +72.23\% & +0.74 pp & -- \\
+\texttt{s3s4\_2} & +0.00\% & +0.06\% & +0.06 pp & -- \\
+\texttt{s0s1\_3} & +0.88\% & -0.02\% & -0.91 pp & -- \\
+\texttt{s1s2\_3} & -0.11\% & +0.00\% & +0.12 pp & -- \\
+\bottomrule
+\end{tabular}
 
 \section*{Calibration Log}
 
@@ -129,6 +180,16 @@ mem+mem 22,510 (LL 6,010, LS 6,000, SS 10,499), and mispredict 2,034.
 Change & Effect & Evidence \\
 \midrule
 \endhead
+Dual trace instrumentation & Added a testbench-only cycle counter to both
+dual commit-log slots; no core datapath files were changed. & The stamped
+CoreMark run reproduced the clean dual app-log counters exactly:
+10,398,758 cycles and 12,771,408
+instructions. \\
+Multi-line \texttt{app\_log} parsing & Fixed parser support for SHAKTI logs
+that print \texttt{IPC\_MEASURE cycles} and \texttt{IPC\_MEASURE instret}
+on separate lines, including the space before the colon. & The selected
+benchmark window now has 12,771,408
+instructions, matching CoreMark ground truth. \\
 WAW/WAR pair handling & Kept WAW and WAR co-issue enabled because
 \texttt{no\_wawstalls} compiles out the checks. & Unit tests verify same-rd
 and write-after-read pairs commit together. \\
@@ -138,41 +199,52 @@ single/pair cases. \\
 Dual bypass shape & Fixed bypass lookup to inspect slot 1 and slot 0 of both
 downstream sources, matching \texttt{bypass.bsv} priority
 \texttt{src0/slot1 > src0/slot0 > src1/slot1 > src1/slot0}. & Full CoreMark
-dual baseline moved from IPC 1.0357 before this fix to IPC 1.2037. \\
+dual baseline moved from IPC 1.0357 before this fix to IPC 1.2060. \\
 Memory pairing policy & Split the actual delivered branch
 (\texttt{memory\_pairing=none}) from the proposed second-port experiment
 (\texttt{memory\_pairing=all}). & Run A is now a true second-memory-port
 experiment instead of the narrower, gated store-involving \texttt{dual\_mem}
 path. \\
+Guarded FIFO backpressure & Modelled \texttt{mkSizedFIFOF} as a guarded FIFO
+where \texttt{FULL\_N} is based on cycle-start occupancy, while \texttt{mkLFIFOF}
+remains loopy. Added split compressed fetch-word handling for the single-issue
+front end. & Dhrystone \texttt{s3s4\_1} moved from a near-zero prediction to
+322,593 model cycles versus
+321,804 RTL; CoreMark
+\texttt{s0s1\_1} is now predicted within 1\% aggregate. \\
+CoreMark holdout windowing & Fixed \texttt{holdout/predict.py} so CoreMark
+variants use the baseline app-log window when only the baseline CoreMark trace
+is archived. & Removed false instruction-stream drift warnings and replaced
+invalid variant $\Delta t$ values with aggregate-only CoreMark validation. \\
 \bottomrule
 \end{longtable}
 
 \section*{Analysis}
 
-Run A, the second memory port, improves IPC by +0.758\%.
+Run A, the second memory port, improves IPC by +0.698\%.
 It removes the modeled non-RAW mem+mem reject counter, but the speedup is much
-smaller than a first-order lost-slot estimate because many newly legal memory
-pairs still contend with RAW dependencies, branch redirects, and lockstep
-movement through later stages.
+smaller than a first-order lost-slot estimate. The measured interaction is
+sub-additive, not lockstep-gated: A+B is smaller than A plus B, so those changes
+remove overlapping bubbles rather than unlocking one another.
 
-Run B improves IPC by +1.164\%, confirming
+Run B improves IPC by +0.689\%, confirming
 that stage3/stage4 coupling is a real limiter. Run C is sub-additive relative to
 A+B, so the second memory port and decoupling overlap in the bubbles they remove.
 
-Run E is the largest individual improvement at +6.115\%.
+Run E is the largest individual improvement at +6.237\%.
 It directly attacks the RAW rejection class and roughly halves the modeled RAW
 reject count. This is the strongest candidate for RTL work if its implementation
 cost is manageable.
 
-Run H gives only +0.473\%. The model's
-independent branch+branch opportunity count is 162,837
+Run H gives only +0.480\%. The model's
+independent branch+branch opportunity count is 159,885
 on CoreMark, so branch+branch is not the dominant issue in this trace. This is
 also a useful independent replacement for the defective RTL event 52.
 
-The automatic stacked run I (A+E+H) reached IPC 1.2717.
+The automatic stacked run I reached IPC 1.2756.
 The extra probes show why it is not the actual best: A+E reached IPC
-1.2579, while
-E+H reached IPC 1.2915.
+1.2619, while
+E+H reached IPC 1.2953.
 So the second memory port interferes with the intra-forwarding win in this trace,
 whereas branch+branch is mildly complementary with intra-forwarding.
 
@@ -183,19 +255,19 @@ whereas branch+branch is mildly complementary with intra-forwarding.
 Config & Cycles & IPC & $\Delta$ IPC \\
 \midrule
 \endhead
-instr\_queue=2 & 10,597,053 & 1.2045 & +0.068\% \\
-instr\_queue=4 & 10,602,913 & 1.2039 & +0.012\% \\
-instr\_queue=6 & 10,604,215 & 1.2037 & +0.000\% \\
-instr\_queue=8 & 10,604,215 & 1.2037 & +0.000\% \\
-instr\_queue=12 & 10,621,087 & 1.2018 & -0.159\% \\
-mispredict penalty=0 & 10,391,676 & 1.2283 & +2.045\% \\
-mispredict penalty=1 & 10,604,215 & 1.2037 & +0.000\% \\
-mispredict penalty=2 & 10,815,746 & 1.1802 & -1.956\% \\
-mispredict penalty=3 & 11,027,277 & 1.1575 & -3.837\% \\
-memory latency=0 & 10,604,215 & 1.2037 & +0.000\% \\
-memory latency=1 & 10,604,215 & 1.2037 & +0.000\% \\
-memory latency=2 & 12,239,228 & 1.0429 & -13.359\% \\
-memory latency=3 & 14,196,758 & 0.8991 & -25.305\% \\
+instr\_queue=2 & 14,681,039 & 0.8699 & -27.868\% \\
+instr\_queue=4 & 10,572,287 & 1.2080 & +0.165\% \\
+instr\_queue=6 & 10,589,781 & 1.2060 & +0.000\% \\
+instr\_queue=8 & 10,590,228 & 1.2060 & -0.004\% \\
+instr\_queue=12 & 10,590,778 & 1.2059 & -0.009\% \\
+mispredict penalty=0 & 10,372,390 & 1.2313 & +2.096\% \\
+mispredict penalty=1 & 10,589,781 & 1.2060 & +0.000\% \\
+mispredict penalty=2 & 10,807,038 & 1.1818 & -2.010\% \\
+mispredict penalty=3 & 11,024,295 & 1.1585 & -3.941\% \\
+memory latency=0 & 10,589,781 & 1.2060 & +0.000\% \\
+memory latency=1 & 12,222,907 & 1.0449 & -13.361\% \\
+memory latency=2 & 14,185,349 & 0.9003 & -25.347\% \\
+memory latency=3 & 16,155,195 & 0.7905 & -34.450\% \\
 \bottomrule
 \end{longtable}
 
@@ -204,39 +276,65 @@ memory latency=3 & 14,196,758 & 0.8991 & -25.305\% \\
 \begin{itemize}
 \item Independent retire alone had no effect because actual lockstep stage4
 already delivers paired slots to stage5 together.
-\item Symmetric slots alone had no effect because the current whitelist already
-captures the useful mixed-FU pairs visible in the trace.
-\item The branch next-PC relaxation is unresolved: the current model does not
-include a separate queue-head next-PC stall beyond predictor redirect timing, so
-the named F config is a no-op and should not be treated as RTL evidence.
+\item The branch next-PC relaxation is unresolved: the named F config remains
+an exact no-op in this model and should not be treated as RTL evidence.
+\item Symmetric slots remains an exact no-op in this trace/model. Treat it as an
+unexpressed hypothesis, not proof that the RTL change is worthless.
 \item Combining decoupled lockstep with intra-bundle forwarding did not drain on
 a 100k-instruction diagnostic run. The final best combination therefore excludes
 B when E is selected; this is reported as a model limitation/negative
 interaction, not hidden.
+\item Quad issue did not complete/drain in the full-trace sweep. It is reported
+as not completed rather than as a measured null.
 \end{itemize}
+
+\section*{Experiment Validation Coverage}
+
+\begin{longtable}{@{}p{0.25\linewidth}p{0.16\linewidth}p{0.19\linewidth}p{0.26\linewidth}@{}}
+\toprule
+Experiment & Predicted gain & Validation status & Notes \\
+\midrule
+\endhead
+Baseline & +0.000\% & model-only & No specific validation mapping recorded. \\
+A: second memory port & +0.698\% & below/near floor & No direct dual memory-port RTL point; fixed memory-latency sensitivity makes the knob active. \\
+B: decouple lockstep & +0.689\% & below/near floor & Coupling logic is model-only; effect is near the CoreMark small-effect floor. \\
+C: A+B & +1.015\% & near floor & Sub-additive; above small-effect floors but below overall mechanism floor. \\
+D: independent retire & +0.000\% & below resolution & Implemented flag has exact zero effect because upstream delivery remains paired. \\
+E: intra-bundle ALU forwarding & +6.237\% & no ground truth & Bypass/forwarding has no buildable single-issue design point. \\
+F: relax branch next-PC stall & +0.000\% & unimplemented/no-op & Exact zero; do not report as an RTL null. \\
+G: symmetric slots & +0.000\% & unimplemented/no-op & Exact zero in this trace/model; do not report as an RTL null. \\
+H: second branch unit & +0.480\% & near/below floor & Small model-owned branch-pair opportunity result. \\
+I: best combination & +5.772\% & partial & Two-issue stack; inherits E's no-ground-truth forwarding limitation. \\
+J: quad issue on best & n/a & not completed & Full-trace quad approximation did not drain/complete. \\
+A+E: memory + intra forwarding & +4.635\% & partial & Shows memory port interferes with E. \\
+E+H: intra forwarding + branch & +7.406\% & partial & Best draining two-issue model result; inherits E limitation. \\
+\bottomrule
+\end{longtable}
+
+Small-effect floors are 0.17 pp on Dhrystone and 0.64 pp on CoreMark; claims at or below that scale should be read as below model resolution.
 
 \section*{Recommendations}
 
 \begin{enumerate}
 \item Prototype intra-bundle ALU forwarding first. Estimated standalone gain:
-+6.115\%; rough RTL cost: medium
++6.237\%; rough RTL cost: medium
 (operand muxing, bypass select, verification of RAW edge cases).
 \item Combine intra-bundle ALU forwarding with a second branch unit only if the
 branch hardware is cheap. Best measured combination: E+H at IPC
-1.2915.
+1.2953.
 \item Treat the second memory port as a secondary change, not the headline by
-itself. Estimated standalone gain: +0.758\%;
+itself. Estimated standalone gain: +0.698\%;
 rough RTL cost: high (D-cache/store-buffer/arbiter integration). It regresses
 the E combination, so do not prioritize it before validating with a dual trace.
 \item Investigate lockstep decoupling separately from intra-forwarding.
-Estimated standalone gain: +1.164\%;
+Estimated standalone gain: +0.689\%;
 rough RTL cost: medium-high because it touches stage3/stage4 valid/ready and
 commit bookkeeping.
 \item Deprioritize branch+branch hardware until a corrected RTL counter or dual
-trace says otherwise. Estimated gain: +0.473\%;
+trace says otherwise. Estimated gain: +0.480\%;
 rough RTL cost: medium.
-\item Do not commit to quad issue from this evidence alone. The quad result is
-an optimistic adjacent-pair approximation, not a validated 4-wide front end.
+\item Do not commit to quad issue from this evidence. The current approximation
+did not drain on the full trace and is not a validated 4-wide front end.
 \end{enumerate}
 
 \section*{Limitations}
@@ -244,9 +342,11 @@ an optimistic adjacent-pair approximation, not a validated 4-wide front end.
 The model is a timing model over an already committed dynamic trace. It does not
 compute data values. It does not model data-cache misses, cache conflicts,
 instruction-cache misses, data-dependent divider timing, or CSR/trap behavior
-that depends on values. The dual validation lacks per-instruction RTL commit
-cycles, so aggregate IPC agreement can still hide local timing errors. A
-cycle-stamped dual RTL CoreMark trace and a Dhrystone commit trace are the next
-required artifacts.
+that depends on values. The dual CoreMark trace now provides per-instruction RTL
+commit cycles, but the baseline model only reaches the accuracy reported above;
+the residual mismatches are concentrated around multiply-heavy and control-flow
+neighborhoods and should be diagnosed before treating the experiment deltas as
+RTL-commitment evidence. A Dhrystone commit trace is still missing for held-out
+$\Delta t$ validation.
 
 \end{document}

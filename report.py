@@ -42,10 +42,22 @@ def render(data: dict[str, Any]) -> str:
     experiments = data["experiments"]
     extra = data.get("extra_combinations", [])
     sensitivity = data["sensitivity"]
+    holdout_dhry = _load_json(Path("holdout/runs/validation-dhrystone.json"))
+    holdout_core = _load_json(Path("holdout/runs/validation-coremark.json"))
     baseline = experiments[0]
     dual_validation = data.get("dual_issue_validation") or baseline
-    best_dual = max([item for item in experiments + extra if item["name"] != "J_quad_issue"], key=lambda item: item["model_ipc"])
+    completed = [
+        item
+        for item in experiments + extra
+        if item["name"] != "J_quad_issue" and item.get("model_ipc") is not None
+    ]
+    best_dual = max(completed, key=lambda item: item["model_ipc"])
     quad = next((item for item in experiments if item["name"] == "J_quad_issue"), None)
+    quad_text = (
+        f"The quad approximation completed with IPC {quad['model_ipc']:.4f}."
+        if quad and quad.get("model_ipc") is not None
+        else "The quad approximation did not complete/drain in the full-trace sweep and is reported as not completed, not as a measured null."
+    )
 
     return rf"""\documentclass[10pt]{{article}}
 \usepackage[a4paper,margin=0.65in]{{geometry}}
@@ -65,7 +77,7 @@ def render(data: dict[str, Any]) -> str:
 
 \section*{{Executive Summary}}
 
-The delivered dual-issue SHAKTI model predicts {fmt_int(baseline['model_cycles'])}
+The current dual-issue SHAKTI model predicts {fmt_int(baseline['model_cycles'])}
 cycles and IPC {baseline['model_ipc']:.4f} on the generated dual CoreMark
 trace window. The clean dual RTL ground truth is {fmt_int(coremark['dual_cycles'])}
 cycles and IPC {coremark['dual_ipc']:.5f}; the cycle-stamped run reproduced
@@ -80,13 +92,18 @@ matching inter-commit deltas), with aggregate cycle error
 Phase-1 gate, so the architectural experiments below are useful directional
 signals but still carry the measured residual timing error.
 
-The most important result is that the second memory port alone helps only
-modestly in this model. Intra-bundle ALU forwarding is the largest individual
-gain. The best draining two-issue combination found is {esc(best_dual['label'])},
-with IPC {best_dual['model_ipc']:.4f}
+The backpressure blind spot that motivated this round is fixed for aggregate
+cycle deltas: the depth-1 s3/s4, s0/s1, s1/s2, and s4/s5 RTL slowdowns are now
+predicted within a few percent. However, local $\Delta t$ cadence is still weak
+for the front-end depth-1 Dhrystone points, so this is not a full mechanism-level
+closure.
+
+The second memory port alone helps only modestly in this model:
+{delta_for(experiments, 'A_second_memory_port')}. Intra-bundle ALU forwarding is
+the largest individual gain. The best draining two-issue combination found is
+{esc(best_dual['label'])}, with IPC {best_dual['model_ipc']:.4f}
 ({pct(best_dual.get('delta_ipc_pct_vs_baseline', 0.0), signed_value=True)}
-versus baseline). The quad approximation is separate and reaches IPC
-{quad['model_ipc']:.4f}. The model-owned branch+branch
+versus baseline). {quad_text} The model-owned branch+branch
 opportunity count is much smaller than the defective RTL event-52 story suggests.
 
 \section*{{Experiment Summary}}
@@ -130,6 +147,14 @@ For reference, the supplied Dhrystone RTL profile was: dual-issued about 50\%
 of cycles, RAW 12,051, one-instruction fetch 4,026, stage3 not firing 4,864,
 mem+mem 22,510 (LL 6,010, LS 6,000, SS 10,499), and mispredict 2,034.
 
+\subsection*{{Held-Out Design-Point Validation}}
+
+{holdout_summary(holdout_dhry, holdout_core)}
+
+{holdout_key_table(holdout_dhry)}
+
+{holdout_key_table(holdout_core)}
+
 \section*{{Calibration Log}}
 
 \begin{{longtable}}{{@{{}}p{{0.23\linewidth}}p{{0.31\linewidth}}p{{0.34\linewidth}}@{{}}}}
@@ -162,6 +187,17 @@ Memory pairing policy & Split the actual delivered branch
 (\texttt{{memory\_pairing=all}}). & Run A is now a true second-memory-port
 experiment instead of the narrower, gated store-involving \texttt{{dual\_mem}}
 path. \\
+Guarded FIFO backpressure & Modelled \texttt{{mkSizedFIFOF}} as a guarded FIFO
+where \texttt{{FULL\_N}} is based on cycle-start occupancy, while \texttt{{mkLFIFOF}}
+remains loopy. Added split compressed fetch-word handling for the single-issue
+front end. & Dhrystone \texttt{{s3s4\_1}} moved from a near-zero prediction to
+{fmt_int(_point(holdout_dhry, 's3s4_1', 'model_cycles'))} model cycles versus
+{fmt_int(_point(holdout_dhry, 's3s4_1', 'rtl_cycles'))} RTL; CoreMark
+\texttt{{s0s1\_1}} is now predicted within 1\% aggregate. \\
+CoreMark holdout windowing & Fixed \texttt{{holdout/predict.py}} so CoreMark
+variants use the baseline app-log window when only the baseline CoreMark trace
+is archived. & Removed false instruction-stream drift warnings and replaced
+invalid variant $\Delta t$ values with aggregate-only CoreMark validation. \\
 \bottomrule
 \end{{longtable}}
 
@@ -169,9 +205,9 @@ path. \\
 
 Run A, the second memory port, improves IPC by {delta_for(experiments, 'A_second_memory_port')}.
 It removes the modeled non-RAW mem+mem reject counter, but the speedup is much
-smaller than a first-order lost-slot estimate because many newly legal memory
-pairs still contend with RAW dependencies, branch redirects, and lockstep
-movement through later stages.
+smaller than a first-order lost-slot estimate. The measured interaction is
+sub-additive, not lockstep-gated: A+B is smaller than A plus B, so those changes
+remove overlapping bubbles rather than unlocking one another.
 
 Run B improves IPC by {delta_for(experiments, 'B_decouple_lockstep')}, confirming
 that stage3/stage4 coupling is a real limiter. Run C is sub-additive relative to
@@ -187,7 +223,7 @@ independent branch+branch opportunity count is {fmt_int(baseline['profile']['bra
 on CoreMark, so branch+branch is not the dominant issue in this trace. This is
 also a useful independent replacement for the defective RTL event 52.
 
-The automatic stacked run I (A+E+H) reached IPC {value_for(experiments, 'I_best_combination', 'model_ipc')}.
+The automatic stacked run I reached IPC {value_for(experiments, 'I_best_combination', 'model_ipc')}.
 The extra probes show why it is not the actual best: A+E reached IPC
 {value_for(extra, 'combo_AE_memory_plus_intra_forwarding', 'model_ipc')}, while
 E+H reached IPC {value_for(extra, 'combo_EH_intra_forwarding_plus_branch', 'model_ipc')}.
@@ -203,16 +239,21 @@ whereas branch+branch is mildly complementary with intra-forwarding.
 \begin{{itemize}}
 \item Independent retire alone had no effect because actual lockstep stage4
 already delivers paired slots to stage5 together.
-\item Symmetric slots alone had no effect because the current whitelist already
-captures the useful mixed-FU pairs visible in the trace.
-\item The branch next-PC relaxation is unresolved: the current model does not
-include a separate queue-head next-PC stall beyond predictor redirect timing, so
-the named F config is a no-op and should not be treated as RTL evidence.
+\item The branch next-PC relaxation is unresolved: the named F config remains
+an exact no-op in this model and should not be treated as RTL evidence.
+\item Symmetric slots remains an exact no-op in this trace/model. Treat it as an
+unexpressed hypothesis, not proof that the RTL change is worthless.
 \item Combining decoupled lockstep with intra-bundle forwarding did not drain on
 a 100k-instruction diagnostic run. The final best combination therefore excludes
 B when E is selected; this is reported as a model limitation/negative
 interaction, not hidden.
+\item Quad issue did not complete/drain in the full-trace sweep. It is reported
+as not completed rather than as a measured null.
 \end{{itemize}}
+
+\section*{{Experiment Validation Coverage}}
+
+{experiment_validation_table(experiments, extra, holdout_dhry, holdout_core)}
 
 \section*{{Recommendations}}
 
@@ -234,8 +275,8 @@ commit bookkeeping.
 \item Deprioritize branch+branch hardware until a corrected RTL counter or dual
 trace says otherwise. Estimated gain: {delta_for(experiments, 'H_second_branch_unit')};
 rough RTL cost: medium.
-\item Do not commit to quad issue from this evidence alone. The quad result is
-an optimistic adjacent-pair approximation, not a validated 4-wide front end.
+\item Do not commit to quad issue from this evidence. The current approximation
+did not drain on the full trace and is not a validated 4-wide front end.
 \end{{enumerate}}
 
 \section*{{Limitations}}
@@ -263,6 +304,12 @@ def experiment_table(experiments: list[dict[str, Any]]) -> str:
         r"\endhead",
     ]
     for exp in experiments:
+        if exp.get("model_cycles") is None:
+            rows.append(
+                f"{esc(exp['label'])} & n/a & n/a & n/a & n/a & "
+                f"{esc(exp.get('verdict', exp.get('status', 'not completed')))} \\\\"
+            )
+            continue
         rows.append(
             f"{esc(exp['label'])} & {fmt_int(exp['model_cycles'])} & {exp['model_ipc']:.4f} & "
             f"{signed(exp.get('delta_ipc_vs_baseline', 0.0), digits=4)} & "
@@ -271,6 +318,117 @@ def experiment_table(experiments: list[dict[str, Any]]) -> str:
         )
     rows.extend([r"\bottomrule", r"\end{longtable}"])
     return "\n".join(rows)
+
+
+def holdout_summary(dhrystone: dict[str, Any] | None, coremark: dict[str, Any] | None) -> str:
+    if not dhrystone or not coremark:
+        return "Held-out validation files were not available when this report was generated."
+    dhry_sum = dhrystone["summary"]
+    core_sum = coremark["summary"]
+    dhry_base = dhrystone["baseline"]
+    core_base = coremark["baseline"]
+    return rf"""
+\begin{{tabular}}{{@{{}}lrrrr@{{}}}}
+\toprule
+Benchmark & Baseline error & Baseline $\Delta t$ & Overall floor & Small-effect floor \\
+\midrule
+Dhrystone & {dhry_base['absolute_error_pct']:+.3f}\% & {dhry_base['delta_t_accuracy']*100:.3f}\% & {dhry_sum['resolution_floor_pp']:.2f} pp & {dhry_sum['small_effect_resolution_floor_pp']:.2f} pp \\
+CoreMark & {core_base['absolute_error_pct']:+.3f}\% & {core_base['delta_t_accuracy']*100:.3f}\% & {core_sum['resolution_floor_pp']:.2f} pp & {core_sum['small_effect_resolution_floor_pp']:.2f} pp \\
+\bottomrule
+\end{{tabular}}
+
+Dhrystone keeps the original held-out baseline accuracy target. CoreMark
+baseline $\Delta t$ is {core_base['delta_t_accuracy']*100:.3f}\%, slightly below
+the requested 99.2\% target, while aggregate cycle error remains within 1\%.
+Variant CoreMark $\Delta t$ is not reported because only the baseline CoreMark
+commit trace is archived; CoreMark variant rows are aggregate delta checks.
+"""
+
+
+def holdout_key_table(result: dict[str, Any] | None) -> str:
+    if not result:
+        return ""
+    wanted = [
+        "s3s4_1",
+        "s0s1_1",
+        "s1s2_1",
+        "s4s5_1",
+        "s3s4_2",
+        "s0s1_3",
+        "s1s2_3",
+    ]
+    rows = [
+        rf"\paragraph{{{esc(result['benchmark']).capitalize()} key backpressure points.}}",
+        r"\begin{tabular}{@{}lrrrr@{}}",
+        r"\toprule",
+        r"Point & Measured & Predicted & Error & $\Delta t$ \\",
+        r"\midrule",
+    ]
+    by_name = {row["name"]: row for row in result.get("rows", [])}
+    for name in wanted:
+        row = by_name.get(name)
+        if row is None:
+            continue
+        acc = row.get("delta_t_accuracy")
+        acc_text = f"{acc*100:.2f}\\%" if acc is not None else "--"
+        tex_name = name.replace("_", r"\_")
+        rows.append(
+            f"\\texttt{{{tex_name}}} & "
+            f"{row['measured_pct']:+.2f}\\% & {row['predicted_pct']:+.2f}\\% & "
+            f"{row['error_pp']:+.2f} pp & {acc_text} \\\\"
+        )
+    rows.extend([r"\bottomrule", r"\end{tabular}"])
+    return "\n".join(rows)
+
+
+def experiment_validation_table(
+    experiments: list[dict[str, Any]],
+    extra: list[dict[str, Any]],
+    dhrystone: dict[str, Any] | None,
+    coremark: dict[str, Any] | None,
+) -> str:
+    core_floor = None
+    dhry_floor = None
+    if coremark:
+        core_floor = coremark["summary"]["small_effect_resolution_floor_pp"]
+    if dhrystone:
+        dhry_floor = dhrystone["summary"]["small_effect_resolution_floor_pp"]
+    rows = [
+        r"\begin{longtable}{@{}p{0.25\linewidth}p{0.16\linewidth}p{0.19\linewidth}p{0.26\linewidth}@{}}",
+        r"\toprule",
+        r"Experiment & Predicted gain & Validation status & Notes \\",
+        r"\midrule",
+        r"\endhead",
+    ]
+    coverage = {
+        "A_second_memory_port": ("below/near floor", "No direct dual memory-port RTL point; fixed memory-latency sensitivity makes the knob active."),
+        "B_decouple_lockstep": ("below/near floor", "Coupling logic is model-only; effect is near the CoreMark small-effect floor."),
+        "C_memory_plus_decouple": ("near floor", "Sub-additive; above small-effect floors but below overall mechanism floor."),
+        "D_independent_retire": ("below resolution", "Implemented flag has exact zero effect because upstream delivery remains paired."),
+        "E_intra_alu_forwarding": ("no ground truth", "Bypass/forwarding has no buildable single-issue design point."),
+        "F_relax_branch_next_pc": ("unimplemented/no-op", "Exact zero; do not report as an RTL null."),
+        "G_symmetric_slots": ("unimplemented/no-op", "Exact zero in this trace/model; do not report as an RTL null."),
+        "H_second_branch_unit": ("near/below floor", "Small model-owned branch-pair opportunity result."),
+        "I_best_combination": ("partial", "Two-issue stack; inherits E's no-ground-truth forwarding limitation."),
+        "J_quad_issue": ("not completed", "Full-trace quad approximation did not drain/complete."),
+        "combo_AE_memory_plus_intra_forwarding": ("partial", "Shows memory port interferes with E."),
+        "combo_EH_intra_forwarding_plus_branch": ("partial", "Best draining two-issue model result; inherits E limitation."),
+    }
+    for exp in experiments + extra:
+        name = exp["name"]
+        status, note = coverage.get(name, ("model-only", "No specific validation mapping recorded."))
+        rows.append(
+            f"{esc(exp['label'])} & {exp_gain(exp)} & {esc(status)} & {esc(note)} \\\\"
+        )
+    rows.extend([r"\bottomrule", r"\end{longtable}"])
+    floor_note = ""
+    if core_floor is not None and dhry_floor is not None:
+        floor_note = (
+            f"Small-effect floors are {dhry_floor:.2f} pp on Dhrystone and "
+            f"{core_floor:.2f} pp on CoreMark; claims at or below that scale "
+            "should be read as below model resolution."
+        )
+    return "\n".join(rows) + "\n\n" + esc(floor_note)
 
 
 def counter_table(profile: dict[str, Any]) -> str:
@@ -302,6 +460,9 @@ def sensitivity_table(sensitivity: list[dict[str, Any]]) -> str:
         r"\endhead",
     ]
     for result in sensitivity:
+        if result.get("model_cycles") is None:
+            rows.append(f"{esc(result['label'])} & n/a & n/a & n/a \\\\")
+            continue
         rows.append(
             f"{esc(result['label'])} & {fmt_int(result['model_cycles'])} & "
             f"{result['model_ipc']:.4f} & {pct(result.get('delta_ipc_pct_vs_baseline', 0.0), signed_value=True)} \\\\"
@@ -321,10 +482,38 @@ def value_for(experiments: list[dict[str, Any]], name: str, key: str) -> str:
     for exp in experiments:
         if exp["name"] == name:
             value = exp.get(key)
+            if value is None:
+                return "n/a"
             if isinstance(value, float):
                 return f"{value:.4f}"
             return str(value)
     return "n/a"
+
+
+def exp_gain(exp: dict[str, Any]) -> str:
+    value = exp.get("delta_ipc_pct_vs_baseline")
+    if value is None:
+        return "n/a"
+    return pct(value, signed_value=True)
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _point(result: dict[str, Any] | None, name: str, key: str) -> Any:
+    if not result:
+        return None
+    for row in result.get("rows", []):
+        if row.get("name") == name:
+            if key == "model_cycles":
+                return row.get("model_cycles")
+            if key == "rtl_cycles":
+                return row.get("rtl_cycles")
+            return row.get(key)
+    return None
 
 
 def fmt_int(value: Any) -> str:
