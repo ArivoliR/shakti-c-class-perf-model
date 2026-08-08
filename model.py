@@ -45,6 +45,76 @@ def parse_makefile_defines(path: str | Path) -> dict[str, int | bool | str]:
     return params
 
 
+def parse_bsv_defines(path: str | Path) -> dict[str, int | str]:
+    params: dict[str, int | str] = {}
+    define_re = re.compile(r"^\s*`define\s+(?P<key>\S+)\s+(?P<value>\S+)")
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        match = define_re.match(line)
+        if match is None:
+            continue
+        value = match.group("value")
+        try:
+            params[match.group("key")] = int(value, 0)
+        except ValueError:
+            params[match.group("key")] = value
+    return params
+
+
+def _find_repo_file(start: Path, relative: str) -> Optional[Path]:
+    for parent in (start.resolve(), *start.resolve().parents):
+        candidate = parent / relative
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _fpu_latency_params(makefile_inc: Path, defines: dict[str, int | bool | str]) -> dict[str, int | str]:
+    fpu_defines_path = _find_repo_file(makefile_inc.parent, "src/fpu/fpu.defines")
+    fpu_defines = parse_bsv_defines(fpu_defines_path) if fpu_defines_path is not None else {}
+    hardfloat = bool(defines.get("hardfloat", False))
+    if hardfloat:
+        sp_sig = 24
+        dp_sig = 53
+        return {
+            "fpu_impl": "hardfloat",
+            "fpu_fma_latency": int(fpu_defines.get("fma_stages", 6)),
+            "fpu_ftoi_latency": int(fpu_defines.get("ftoi_stages", 2)),
+            "fpu_itof_latency": int(fpu_defines.get("itof_stages", 2)),
+            "fpu_ftof_latency": int(fpu_defines.get("ftof_stages", 2)),
+            "fpu_div_sp_latency": sp_sig + 2,
+            "fpu_div_dp_latency": dp_sig + 2,
+            "fpu_sqrt_sp_latency": sp_sig + 1,
+            "fpu_sqrt_dp_latency": dp_sig + 1,
+        }
+    # The default C-Class config does not define `hardfloat`; fpu.bsv selects
+    # bsv_float. Its FMA module has one top-level input FIFO cycle plus four
+    # explicit state-machine stages before the output wire is visible.
+    sp_man = 23
+    dp_man = 52
+    return {
+        "fpu_impl": "bsv_float",
+        "fpu_fma_latency": 5,
+        "fpu_ftoi_latency": 1,
+        "fpu_itof_latency": 1,
+        "fpu_ftof_latency": 1,
+        "fpu_div_sp_latency": _bsv_float_div_latency(sp_man),
+        "fpu_div_dp_latency": _bsv_float_div_latency(dp_man),
+        "fpu_sqrt_sp_latency": _bsv_float_sqrt_latency(sp_man),
+        "fpu_sqrt_dp_latency": _bsv_float_sqrt_latency(dp_man),
+    }
+
+
+def _bsv_float_div_latency(fpman: int) -> int:
+    fpman4 = fpman + 4
+    int_div_last_state = ((fpman4 - 5) >> 1) + 2
+    return 1 + 1 + int_div_last_state + 1
+
+
+def _bsv_float_sqrt_latency(fpman: int) -> int:
+    fpman3 = fpman + 3
+    return 1 + (fpman3 - 1)
+
+
 @dataclass(slots=True)
 class PipeEntry:
     trace: TraceEntry
@@ -376,6 +446,17 @@ class Model:
         load_hit_latency: int = 0,
         store_hit_latency: int = 0,
         csr_latency: int = 1,
+        fpu_impl: str = "bsv_float",
+        fpu_fma_latency: int = 5,
+        fpu_ftoi_latency: int = 1,
+        fpu_itof_latency: int = 1,
+        fpu_ftof_latency: int = 1,
+        fpu_div_sp_latency: int = 16,
+        fpu_div_dp_latency: int = 30,
+        fpu_sqrt_sp_latency: int = 26,
+        fpu_sqrt_dp_latency: int = 55,
+        fpu_single_latency: int = 1,
+        fpu_result_to_ready_delay: int = 1,
         branch_mispredict_penalty: int = 1,
         upper_half_32b_target_penalty: int = 1,
         upper_half_32b_mispredict_penalty: int = 0,
@@ -421,6 +502,8 @@ class Model:
             raise ValueError("dual_policy must be 'single', 'generic', or 'shakti'")
         if memory_pairing not in ("none", "store_involving", "all"):
             raise ValueError("memory_pairing must be 'none', 'store_involving', or 'all'")
+        if fpu_impl not in ("bsv_float", "hardfloat"):
+            raise ValueError("fpu_impl must be 'bsv_float' or 'hardfloat'")
         self.q_s0s1 = FixedQueue(
             isb_s0s1,
             allow_enq_after_deq_when_full=sized_fifo_allows_enq_after_deq_when_full,
@@ -455,6 +538,17 @@ class Model:
         self.load_hit_latency = load_hit_latency
         self.store_hit_latency = store_hit_latency
         self.csr_latency = csr_latency
+        self.fpu_impl = fpu_impl
+        self.fpu_fma_latency = fpu_fma_latency
+        self.fpu_ftoi_latency = fpu_ftoi_latency
+        self.fpu_itof_latency = fpu_itof_latency
+        self.fpu_ftof_latency = fpu_ftof_latency
+        self.fpu_div_sp_latency = fpu_div_sp_latency
+        self.fpu_div_dp_latency = fpu_div_dp_latency
+        self.fpu_sqrt_sp_latency = fpu_sqrt_sp_latency
+        self.fpu_sqrt_dp_latency = fpu_sqrt_dp_latency
+        self.fpu_single_latency = fpu_single_latency
+        self.fpu_result_to_ready_delay = fpu_result_to_ready_delay
         self.branch_mispredict_penalty = branch_mispredict_penalty
         self.upper_half_32b_target_penalty = upper_half_32b_target_penalty
         self.upper_half_32b_mispredict_penalty = upper_half_32b_mispredict_penalty
@@ -508,6 +602,7 @@ class Model:
         self.fetch_blocked_by: Optional[int] = None
         self.stage1_buffered_entry: Optional[PipeEntry] = None
         self.div_busy_until = 0
+        self.fpu_busy_until = 0
         self.load_release_cycle: dict[tuple[str, int], int] = {}
         self.pending_predictor_training: Deque[PredictorTraining] = deque()
         self.control_events: list[ControlEvent] = []
@@ -567,6 +662,7 @@ class Model:
             "compressed": bool(defines.get("compressed", False)),
             "dual_mem": bool(defines.get("dual_mem", False)),
         }
+        kwargs.update(_fpu_latency_params(Path(makefile_inc), defines))
         kwargs.update(overrides)
         return cls(**kwargs)
 
@@ -665,6 +761,7 @@ class Model:
         self.fetch_blocked_by = None
         self.stage1_buffered_entry = None
         self.div_busy_until = 0
+        self.fpu_busy_until = 0
         self.load_release_cycle.clear()
         self.pending_predictor_training.clear()
         self.control_events.clear()
@@ -751,8 +848,7 @@ class Model:
                 self.stale_frontend_flushed = True
                 self.redirect_this_cycle = True
             self._schedule_predictor_training(entry)
-        if insn.is_div:
-            self.div_busy_until = self.cycle + self.div_latency
+        self._reserve_multicycle_unit(insn, entry.result_ready_cycle)
         if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
             self.flush_countdown = max(self.flush_countdown, self.wb_flush_penalty)
             self.redirect_this_cycle = True
@@ -898,8 +994,7 @@ class Model:
                     self.stale_frontend_flushed = True
                     self.redirect_this_cycle = True
                 self._schedule_predictor_training(entry)
-            if insn.is_div:
-                self.div_busy_until = self.cycle + self.div_latency
+            self._reserve_multicycle_unit(insn, entry.result_ready_cycle)
             if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
                 self.flush_countdown = max(self.flush_countdown, self.wb_flush_penalty)
                 self.redirect_this_cycle = True
@@ -947,8 +1042,7 @@ class Model:
                 self.stale_frontend_flushed = True
                 self.redirect_this_cycle = True
             self._schedule_predictor_training(entry)
-        if insn.is_div:
-            self.div_busy_until = self.cycle + self.div_latency
+        self._reserve_multicycle_unit(insn, entry.result_ready_cycle)
         if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
             self.flush_countdown = max(self.flush_countdown, self.wb_flush_penalty)
             self.redirect_this_cycle = True
@@ -1236,6 +1330,8 @@ class Model:
             insn = entry.insn
             if insn.is_div and self.cycle < self.div_busy_until:
                 return False
+            if insn.is_float and self.cycle < self.fpu_busy_until:
+                return False
             if self._uses_memory_issue_resource(insn):
                 memory_count += 1
                 if memory_count > self.memory_issue_width:
@@ -1294,11 +1390,19 @@ class Model:
     def _fu_ready(self, insn: Instruction) -> bool:
         if insn.is_div:
             return self.cycle >= self.div_busy_until
+        if insn.is_float and self.cycle < self.fpu_busy_until:
+            return False
         if self._uses_memory_issue_resource(insn) and self.memory_issues_this_cycle >= self.memory_issue_width:
             return False
         if insn.is_control and self.control_issues_this_cycle >= self.control_issue_width:
             return False
         return True
+
+    def _reserve_multicycle_unit(self, insn: Instruction, ready_cycle: int) -> None:
+        if insn.is_div:
+            self.div_busy_until = self.cycle + self.div_latency
+        if insn.is_float:
+            self.fpu_busy_until = max(self.fpu_busy_until, ready_cycle + self.fpu_result_to_ready_delay)
 
     def _reserve_issue_resource(self, insn: Instruction) -> None:
         if self._uses_memory_issue_resource(insn):
@@ -1416,9 +1520,26 @@ class Model:
             return self.cycle + self.mul_latency + self.mul_latency_adjust
         if insn.is_div:
             return self.cycle + self.div_latency
+        if insn.is_float:
+            return self.cycle + self._fpu_result_latency(insn)
         if insn.is_csr or insn.fu == "SYSTEM":
             return self.cycle + self.csr_latency
         return self.cycle + 1
+
+    def _fpu_result_latency(self, insn: Instruction) -> int:
+        if insn.fp_op == "fma":
+            return self.fpu_fma_latency
+        if insn.fp_op == "ftoi":
+            return self.fpu_ftoi_latency
+        if insn.fp_op == "itof":
+            return self.fpu_itof_latency
+        if insn.fp_op == "ftof":
+            return self.fpu_ftof_latency
+        if insn.fp_op == "div":
+            return self.fpu_div_dp_latency if insn.fp_width == 64 else self.fpu_div_sp_latency
+        if insn.fp_op == "sqrt":
+            return self.fpu_sqrt_dp_latency if insn.fp_width == 64 else self.fpu_sqrt_sp_latency
+        return self.fpu_single_latency
 
     def _is_base_result_available_in_s3s4(self, insn: Instruction) -> bool:
         return not (insn.is_load or insn.is_mul or insn.is_div or insn.is_float or insn.fu in ("SYSTEM", "TRAP"))

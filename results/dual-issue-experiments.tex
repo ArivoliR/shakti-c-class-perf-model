@@ -37,6 +37,13 @@ predicted within a few percent. However, local $\Delta t$ cadence is still weak
 for the front-end depth-1 Dhrystone points, so this is not a full mechanism-level
 closure.
 
+A single-issue floating-point validation addendum now closes the integer-only
+hole in the validation set. A new dense FP benchmark has 28.575\% FLOAT
+instructions in its measured window. Before FP timing was modelled, the
+single-issue model reached only 64.612\% $\Delta t$ accuracy on that trace; after
+adding source-derived FPU latency it reaches 99.863\%, with -0.063\% aggregate
+cycle error.
+
 The second memory port alone helps only modestly in this model:
 +0.698\%. Intra-bundle ALU forwarding is
 the largest individual gain. The best draining two-issue combination found is
@@ -173,6 +180,89 @@ Point & Measured & Predicted & Error & $\Delta t$ \\
 \bottomrule
 \end{tabular}
 
+\subsection*{Single-Issue Floating-Point Validation}
+
+The prior holdout set was entirely integer. Dhrystone and CoreMark contain no
+dynamic FLOAT instructions in the measured windows, so the FPU path had not been
+validated. I added \texttt{benchmarks/fpbench/}, a self-contained dense double
+matrix kernel, instead of importing Whetstone. The reason was practical:
+\texttt{fpbench} uses no libm, has no host-dependent timing harness, and keeps
+FP work from being constant-folded with volatile matrices and a checksum.
+
+Two independent baseline simulator runs both measured 1,646,171 cycles and
+739,818 retired instructions for \texttt{ITERATIONS=100}. The measured window's
+decoded mix is:
+
+\begin{tabular}{@{}lrr@{}}
+\toprule
+FU class & Instructions & Share \\
+\midrule
+ALU & 354,709 & 47.945\% \\
+FLOAT & 211,400 & 28.575\% \\
+MEMORY & 115,204 & 15.572\% \\
+BRANCH & 58,500 & 7.907\% \\
+\bottomrule
+\end{tabular}
+
+The FLOAT sub-ops are 211,300 FMA-path operations
+(\texttt{fmadd}, \texttt{fadd}, \texttt{fsub}, \texttt{fmul}) and 100
+integer-to-float conversions, so the benchmark exercises the normal FP datapath
+rather than accidentally compiling to soft-float.
+
+\paragraph{FPU timing.}
+The single-issue makefile defines \texttt{spfpu} and \texttt{dpfpu}, but not
+\texttt{hardfloat}; \texttt{src/fpu/fpu.bsv} therefore instantiates
+\texttt{fpu\_bsvfloat}. The model now detects this from \texttt{makefile.inc}.
+For a hardfloat build it reads \texttt{fma\_stages}, \texttt{ftoi\_stages},
+\texttt{itof\_stages}, and \texttt{ftof\_stages} from
+\texttt{src/fpu/fpu.defines}. For the active \texttt{bsv\_float} build, the FMA
+path is five cycles: one top-level input FIFO cycle plus the four explicit
+\texttt{fpu\_fm\_add\_sub} state-machine stages before the result is visible.
+The FPU ready signal lags the result by one cycle because it observes
+\texttt{rg\_multicycle\_op} and \texttt{ff\_input.notEmpty}.
+
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Model & Cycles & IPC & Cycle error & $\Delta t$ accuracy \\
+\midrule
+Before FP latency & 812,847 & 0.9102 & -50.622\% & 64.612\% \\
+After FP latency & 1,645,141 & 0.4497 & -0.063\% & 99.863\% \\
+\bottomrule
+\end{tabular}
+
+The integer baselines do not regress: Dhrystone remains 99.655\% $\Delta t$
+accurate with -0.446\% cycle error, and CoreMark remains 99.150\% $\Delta t$
+accurate with -0.790\% cycle error.
+
+\paragraph{FP buffer-depth ladder.}
+The integer-only conclusion that \texttt{isb\_s3s4} depths 2, 3 and 4 are all
+free is too broad. Under FP load, depth 2 costs cycles:
+
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Point & RTL delta & Model delta & Error & $\Delta t$ accuracy \\
+\midrule
+\texttt{s3s4\_1} & +42.554\% & +45.310\% & +2.756 pp & 92.118\% \\
+\texttt{s3s4\_2} & +3.159\% & +3.118\% & -0.041 pp & 99.768\% \\
+\texttt{s3s4\_3} & +0.000\% & +0.000\% & +0.000 pp & 99.863\% \\
+\texttt{s3s4\_4} & +0.000\% & +0.000\% & +0.000 pp & 99.863\% \\
+\texttt{s4s5\_1} & +21.783\% & +21.852\% & +0.069 pp & 99.985\% \\
+\texttt{s4s5\_2} & +0.000\% & +0.000\% & +0.000 pp & 99.863\% \\
+\bottomrule
+\end{tabular}
+
+So the area conclusion is revised: \texttt{s3s4=2} is not free for FP
+throughput, while \texttt{s3s4=3}, \texttt{s3s4=4}, and \texttt{s4s5=2} still
+match the capacity-8 baseline on this workload.
+
+\paragraph{Dual-issue FLOAT pairing.}
+The dual-issue source was checked read-only. \texttt{stage2.bsv} allows
+\texttt{ALU+FLOAT}, \texttt{FLOAT+ALU}, \texttt{CONTROL+FLOAT}, and
+\texttt{FLOAT+CONTROL}, where CONTROL is \texttt{BRANCH}, \texttt{JAL}, or
+\texttt{JALR}. \texttt{FLOAT+FLOAT} and unlisted scarce-FU combinations fall
+through to single issue. The model's FLOAT pairing whitelist matches the RTL
+source, but there is still no dynamic dual-issue FP validation trace.
+
 \section*{Calibration Log}
 
 \begin{longtable}{@{}p{0.23\linewidth}p{0.31\linewidth}p{0.34\linewidth}@{}}
@@ -216,6 +306,12 @@ CoreMark holdout windowing & Fixed \texttt{holdout/predict.py} so CoreMark
 variants use the baseline app-log window when only the baseline CoreMark trace
 is archived. & Removed false instruction-stream drift warnings and replaced
 invalid variant $\Delta t$ values with aggregate-only CoreMark validation. \\
+Floating-point timing & Added FP operation classes to the decoder and FPU
+latency parameters to \texttt{Model}. The active single-issue build uses
+\texttt{bsv\_float}, not hardfloat, so FMA latency is source-derived from the
+\texttt{fpu\_fm\_add\_sub} state machine rather than from a fitted constant. &
+\texttt{fpbench} accuracy moved from 64.612\% to 99.863\% $\Delta t$, and the
+integer baselines did not move. \\
 \bottomrule
 \end{longtable}
 
@@ -340,13 +436,16 @@ did not drain on the full trace and is not a validated 4-wide front end.
 \section*{Limitations}
 
 The model is a timing model over an already committed dynamic trace. It does not
-compute data values. It does not model data-cache misses, cache conflicts,
-instruction-cache misses, data-dependent divider timing, or CSR/trap behavior
-that depends on values. The dual CoreMark trace now provides per-instruction RTL
-commit cycles, but the baseline model only reaches the accuracy reported above;
-the residual mismatches are concentrated around multiply-heavy and control-flow
-neighborhoods and should be diagnosed before treating the experiment deltas as
-RTL-commitment evidence. A Dhrystone commit trace is still missing for held-out
-$\Delta t$ validation.
+compute data values. The validation set now covers small-footprint,
+cache-resident integer code plus one dense floating-point arithmetic kernel. It
+still does not model data-cache misses, cache conflicts, instruction-cache
+misses, wrong-path fetch bandwidth, FP divide/sqrt data-dependent special cases,
+or CSR/trap behavior that depends on values. The dual CoreMark trace now
+provides per-instruction RTL commit cycles, but the baseline model only reaches
+the accuracy reported above; the residual mismatches are concentrated around
+multiply-heavy and control-flow neighborhoods and should be diagnosed before
+treating the experiment deltas as RTL-commitment evidence. A Dhrystone commit
+trace is still missing for held-out dual-issue $\Delta t$ validation, and no
+dynamic dual-issue FP trace exists yet.
 
 \end{document}

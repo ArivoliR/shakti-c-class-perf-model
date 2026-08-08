@@ -41,6 +41,44 @@ def test_decode_load_store_and_muldiv():
     assert div.is_div
 
 
+def test_decode_floating_point_timing_classes():
+    fmadd = decode(0x72F6F743, pc=0x1000)  # fmadd.d fa4, fa3, fa5, fa4
+    assert fmadd.name == "fmadd"
+    assert fmadd.fu == "FLOAT"
+    assert fmadd.fp_op == "fma"
+    assert fmadd.fp_width == 64
+    assert fmadd.rd_type == FRF
+    assert fmadd.rs1_type == FRF
+    assert fmadd.rs2_type == FRF
+    assert fmadd.rs3_type == FRF
+    assert fmadd.uses_rs1 and fmadd.uses_rs2 and fmadd.uses_rs3
+
+    fmul = decode(0x12B77753, pc=0x1004)  # fmul.d fa4, fa4, fa1
+    assert fmul.name == "fmul"
+    assert fmul.fp_op == "fma"
+    assert fmul.fp_width == 64
+
+    itof = decode(0xD2068753, pc=0x1008)  # fcvt.d.w fa4, a3
+    assert itof.name == "fcvt_f_i"
+    assert itof.fp_op == "itof"
+    assert itof.rd_type == FRF
+    assert itof.rs1_type == IRF
+    assert not itof.uses_rs2
+
+    ftoi = decode(0xC20795D3, pc=0x100C)  # fcvt.w.d a1, fa5, rtz
+    assert ftoi.name == "fcvt_i_f"
+    assert ftoi.fp_op == "ftoi"
+    assert ftoi.rd_type == IRF
+    assert ftoi.rs1_type == FRF
+    assert not ftoi.uses_rs2
+
+    fsqrt = decode(0x5A070753, pc=0x1010)  # fsqrt.d fa4, fa4
+    assert fsqrt.name == "fsqrt"
+    assert fsqrt.fp_op == "sqrt"
+    assert fsqrt.fp_width == 64
+    assert not fsqrt.uses_rs2
+
+
 def test_decode_control_immediates():
     beq = decode(0x00208463, pc=0x2000)  # beq x1, x2, +8
     assert beq.is_branch

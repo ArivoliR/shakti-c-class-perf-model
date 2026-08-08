@@ -69,6 +69,8 @@ class Instruction:
     is_div: bool = False
     is_float: bool = False
     is_compressed: bool = False
+    fp_op: str = ""
+    fp_width: int = 0
 
     @property
     def is_control(self) -> bool:
@@ -236,7 +238,8 @@ def _decode_32(enc: int, pc: int) -> Instruction:
         inst.is_store = True
         return inst
     if opcode in (0x43, 0x47, 0x4B, 0x4F):
-        inst = _with_rd(_base(enc, pc, "fmadd", "FLOAT"), rd, FRF)
+        name = {0x43: "fmadd", 0x47: "fmsub", 0x4B: "fnmsub", 0x4F: "fnmadd"}[opcode]
+        inst = _with_rd(_base(enc, pc, name, "FLOAT"), rd, FRF)
         inst.rs1 = rs1
         inst.rs2 = rs2
         inst.rs3 = bits(enc, 31, 27)
@@ -247,6 +250,8 @@ def _decode_32(enc: int, pc: int) -> Instruction:
         inst.uses_rs2 = True
         inst.uses_rs3 = True
         inst.is_float = True
+        inst.fp_op = "fma"
+        inst.fp_width = _fp_width(bits(enc, 26, 25))
         return inst
     if opcode == 0x53:
         return _decode_float(enc, pc, rd, rs1, rs2, funct3, funct7)
@@ -280,7 +285,10 @@ def _decode_system(enc: int, pc: int, rd: int, funct3: int, rs1: int) -> Instruc
 
 
 def _decode_float(enc: int, pc: int, rd: int, rs1: int, rs2: int, funct3: int, funct7: int) -> Instruction:
-    inst = _with_rd(_base(enc, pc, "fpu", "FLOAT"), rd, FRF)
+    major = funct7 >> 2
+    fmt = funct7 & 0b11
+    name, fp_op = _float_name_and_op(major, funct3, funct7)
+    inst = _with_rd(_base(enc, pc, name, "FLOAT"), rd, FRF)
     inst.rs1 = rs1
     inst.rs2 = rs2
     inst.rs1_type = FRF
@@ -288,18 +296,63 @@ def _decode_float(enc: int, pc: int, rd: int, rs1: int, rs2: int, funct3: int, f
     inst.uses_rs1 = True
     inst.uses_rs2 = True
     inst.is_float = True
+    inst.fp_op = fp_op
+    inst.fp_width = _fp_width(fmt)
 
-    major = funct7 >> 2
-    if major in (0b11000, 0b11010):  # fcvt.* to integer
+    if major == 0b11000:  # fcvt integer from float
         inst.rd_type = IRF
-    elif major in (0b11100,):  # fmv.x/fclass
+        inst.uses_rs2 = False
+    elif major == 0b11010:  # fcvt float from integer
+        inst.rs1_type = IRF
+        inst.rs2_type = IRF
+        inst.uses_rs2 = False
+    elif major == 0b01000:  # fcvt.s.d / fcvt.d.s
+        inst.uses_rs2 = False
+    elif major == 0b01011:  # fsqrt
+        inst.uses_rs2 = False
+    elif major == 0b11100:  # fmv.x/fclass
         if funct3 in (0, 1):
             inst.rd_type = IRF
-    elif major in (0b11110,):  # fmv.w.x/fmv.d.x
+        inst.uses_rs2 = False
+    elif major == 0b11110:  # fmv.w.x/fmv.d.x
         inst.rs1_type = IRF
         inst.rs2_type = IRF
         inst.uses_rs2 = False
     return inst
+
+
+def _fp_width(fmt: int) -> int:
+    return 64 if fmt == 1 else 32
+
+
+def _float_name_and_op(major: int, funct3: int, funct7: int) -> tuple[str, str]:
+    if major == 0b00000:
+        return "fadd", "fma"
+    if major == 0b00001:
+        return "fsub", "fma"
+    if major == 0b00010:
+        return "fmul", "fma"
+    if major == 0b00011:
+        return "fdiv", "div"
+    if major == 0b01011:
+        return "fsqrt", "sqrt"
+    if major == 0b00100:
+        return "fsgnj", "single"
+    if major == 0b00101:
+        return "fminmax", "single"
+    if major == 0b01000:
+        return "fcvt_f_f", "ftof"
+    if major == 0b10100:
+        return "fcmp", "single"
+    if major == 0b11000:
+        return "fcvt_i_f", "ftoi"
+    if major == 0b11010:
+        return "fcvt_f_i", "itof"
+    if major == 0b11100:
+        return ("fclass" if funct3 == 1 else "fmv_x_f"), "single"
+    if major == 0b11110:
+        return "fmv_f_x", "single"
+    return "fpu", "single"
 
 
 def _decode_compressed(enc: int, pc: int) -> Instruction:

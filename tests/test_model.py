@@ -433,6 +433,43 @@ def test_mul_latency_adjust_extends_result_ready_cycle():
     assert model._result_ready_cycle(mul) == 10
 
 
+def test_fpu_fma_latency_controls_result_ready_cycle():
+    model = small_model(fpu_fma_latency=5)
+    model.cycle = 7
+    fmul = entry(1, 0x1004, 0x12B77753).insn  # fmul.d fa4, fa4, fa1
+    itof = entry(2, 0x1008, 0xD2068753).insn  # fcvt.d.w fa4, a3
+
+    assert fmul.fp_op == "fma"
+    assert model._result_ready_cycle(fmul) == 12
+    assert itof.fp_op == "itof"
+    assert model._result_ready_cycle(itof) == 8
+
+
+def test_fpu_busy_is_structural_for_multicycle_float_ops():
+    model = small_model(fpu_fma_latency=5)
+    model.cycle = 10
+    model.fpu_busy_until = 15
+    fmul = entry(1, 0x1004, 0x12B77753).insn
+    addi = entry(2, 0x1008, 0x00108113).insn
+
+    assert not model._fu_ready(fmul)
+    assert model._fu_ready(addi)
+    model.cycle = 15
+    assert model._fu_ready(fmul)
+
+
+def test_fpu_ready_lags_result_by_one_cycle():
+    model = small_model(fpu_fma_latency=5, fpu_result_to_ready_delay=1)
+    model.cycle = 10
+    fmul = entry(1, 0x1004, 0x12B77753).insn
+    ready_cycle = model._result_ready_cycle(fmul)
+
+    model._reserve_multicycle_unit(fmul, ready_cycle)
+
+    assert ready_cycle == 15
+    assert model.fpu_busy_until == 16
+
+
 def test_upper_half_32b_target_waits_for_frontend_visibility():
     model = small_model(enable_bpu=True)
     prev = entry(0, 0x80001C1C, 0x0C4018513)  # addi

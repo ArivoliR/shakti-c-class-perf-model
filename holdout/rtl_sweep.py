@@ -76,6 +76,11 @@ BENCHMARKS = {
         "rtldump": False,
         "marker": "CoreMark 1.0 :",
     },
+    "fpbench": {
+        "make": ["fpbench", "ITERATIONS=100"],
+        "rtldump": True,
+        "marker": "IPC_MEASURE",
+    },
 }
 
 

@@ -203,6 +203,95 @@ since per-point CoreMark traces are not archived:
 ../../.venv/bin/python3 score.py --benchmark coremark
 ```
 
+## Floating-point validation
+
+The original holdout set covered small-footprint, cache-resident integer code:
+Dhrystone and CoreMark contain no dynamic FLOAT instructions in the measured
+windows. That left the model's FPU timing untested.
+
+`benchmarks/fpbench/` fills that gap with a self-contained dense double
+matrix kernel. I used this instead of importing a Whetstone port because it
+needs no libm, has no host-dependent timing harness, and makes it easy to
+prevent constant folding with volatile matrices and a checksum. The target is:
+
+```sh
+make -C ../../benchmarks fpbench ITERATIONS=100
+```
+
+It prints the same marker as Dhrystone:
+
+```text
+IPC_MEASURE cycles: %d instret: %d runs: %d
+```
+
+Two independent baseline simulator runs both measured 1,646,171 cycles and
+739,818 retired instructions, so the counter window is stable. The measured
+window's decoded mix is:
+
+| FU class | instructions | share |
+|---|---:|---:|
+| ALU | 354,709 | 47.945% |
+| FLOAT | 211,400 | 28.575% |
+| MEMORY | 115,204 | 15.572% |
+| BRANCH | 58,500 | 7.907% |
+
+FLOAT is therefore non-trivial. The FLOAT sub-ops in the measured window are
+211,300 FMA-path operations (`fmadd`, `fadd`, `fsub`, `fmul`) and 100 integer to
+float conversions.
+
+### FPU timing fix
+
+The single-issue baseline makefile defines `spfpu` and `dpfpu`, but not
+`hardfloat`. `src/fpu/fpu.bsv` therefore instantiates `fpu_bsvfloat`, not the
+hardfloat wrapper. The model now detects this from `makefile.inc`.
+
+For a hardfloat build, the model reads `src/fpu/fpu.defines` and uses
+`fma_stages`, `ftoi_stages`, `itof_stages`, and `ftof_stages`. The hardfloat
+divide/sqrt path is derived from `divSqrtRecFN_small`, where normal divide
+starts with `sigWidth+2` cycles and sqrt with `sigWidth`/`sigWidth+1` depending
+on the input exponent; data-dependent special cases remain a limitation.
+
+For the active `bsv_float` build, FMA-path latency is modelled as five cycles:
+one top-level input FIFO cycle plus the four explicit
+`fpu_fm_add_sub` state-machine stages before the result is visible. The FPU
+ready signal lags the result by one cycle because `fpu_ready` is
+`!(rg_multicycle_op || ff_input.notEmpty)`, so a new operation cannot enter in
+the same cycle the result is produced.
+
+| Model | cycles | IPC | total-cycle error | delta-t accuracy |
+|---|---:|---:|---:|---:|
+| before FP latency | 812,847 | 0.9102 | -50.622% | 64.612% |
+| after FP latency | 1,645,141 | 0.4497 | -0.063% | 99.863% |
+
+The fix does not move the integer baselines: Dhrystone remains 99.655%
+delta-t accurate with -0.446% cycle error, and CoreMark remains 99.150%
+delta-t accurate with -0.790% cycle error.
+
+### FP buffer-depth ladder
+
+The integer-only conclusion that `isb_s3s4` depths 2, 3 and 4 were all free is
+too broad. Under FP load, depth 2 has a measurable cost:
+
+| point | RTL delta | model delta | error | delta-t accuracy |
+|---|---:|---:|---:|---:|
+| `s3s4_1` | +42.554% | +45.310% | +2.756 pp | 92.118% |
+| `s3s4_2` | +3.159% | +3.118% | -0.041 pp | 99.768% |
+| `s3s4_3` | +0.000% | +0.000% | +0.000 pp | 99.863% |
+| `s3s4_4` | +0.000% | +0.000% | +0.000 pp | 99.863% |
+| `s4s5_1` | +21.783% | +21.852% | +0.069 pp | 99.985% |
+| `s4s5_2` | +0.000% | +0.000% | +0.000 pp | 99.863% |
+
+So `s3s4=2` is not free for FP throughput. `s3s4=3` and `s3s4=4` still match
+the capacity-8 baseline on this workload, and `s4s5=2` remains free.
+
+### Dual-issue FLOAT pairing source check
+
+The dual-issue source was read only. `stage2.bsv` allows `ALU+FLOAT`,
+`FLOAT+ALU`, `CONTROL+FLOAT`, and `FLOAT+CONTROL`, where CONTROL means
+`BRANCH`, `JAL`, or `JALR`. `FLOAT+FLOAT` and unlisted scarce-FU combinations
+fall through to single issue. The model's FLOAT whitelist matches those RTL
+rules, but there is still no dynamic dual-issue FP validation trace.
+
 ## Reading the output
 
 `score.py` reports three numbers, answering different questions:
@@ -259,8 +348,9 @@ resolution*, never as a number.
 ## What this does not establish
 
 The design points here are all microarchitectural knobs on the single-issue
-core. They give an error bar for predictions *of that kind*. They say nothing
-about:
+core. They give an error bar for predictions *of that kind*. The validation set
+now covers small-footprint, cache-resident integer code plus one dense
+floating-point arithmetic kernel. It still says nothing about:
 
 - **Cache behaviour.** The model has no data cache; load/store timing is a fixed
   hit latency. Neither benchmark misses meaningfully, so no point here perturbs
@@ -269,6 +359,10 @@ about:
 - **Front-end wrong-path effects.** The model consumes the committed stream, so
   it never sees wrong-path fetch consuming bandwidth. Experiments F and G touch
   the front end.
+- **Full FP corner behavior.** The FP benchmark validates the common FMA/add/sub
+  path and integer-to-float conversion. FP divide/sqrt latency is source-derived
+  and parameterized, but data-dependent special cases are not dynamically
+  validated by this benchmark.
 - **Issue width.** Single→dual-issue is a structural change of a different
   character. It is a genuine held-out point and should be scored the same way
   once a cycle-stamped dual trace exists, but it is not covered by this sweep.
