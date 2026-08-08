@@ -294,6 +294,72 @@ UNMODELLABLE: dict[str, str] = {
     ),
 }
 
+#: D-cache ladder. Unlike every other group here, these are deliberately
+#: MEASURE-FIRST: the model currently has no memory-latency parameter at all
+#: (`_result_ready_cycle` prices loads and stores at ~1 cycle), so the
+#: pre-flight will report them UNMAPPED and that is expected. The point is to
+#: obtain ground truth for a mechanism before modelling it, rather than adding
+#: a constant and fitting it afterwards.
+#:
+#: Motivation: on the dual-issue CoreMark trace the RTL stalls 9-23 cycles on
+#: stores where the model predicts 1. That is why the model prices a second
+#: memory port at +0.7% while the RTL counters attribute 51% of lost dual-issue
+#: slots to mem+mem. These knobs are the only buildable probes of that path.
+DCACHE_POINTS: tuple[DesignPoint, ...] = (
+    DesignPoint(
+        name="dsb1",
+        edits={"dsbsize": 1},
+        mechanism="D-cache store buffer 2 -> 1 entry",
+        why="The most direct probe of the store path, and the premise of "
+        "Option-1 Phase 1 (2-wide store-buffer enqueue). If halving the store "
+        "buffer measurably slows the core, stores are a binding constraint and "
+        "the roadmap item is justified independently of the model. If it does "
+        "not move, that is a serious signal before committing months of BSV.",
+        expect="unknown - this is the experiment",
+        may_fail=True,
+        tags=("memory", "measure-first"),
+    ),
+    DesignPoint(
+        name="dsb4",
+        edits={"dsbsize": 4},
+        mechanism="D-cache store buffer 2 -> 4 entries",
+        why="The other direction. Together with dsb1 this gives a gradient "
+        "rather than a single point, which is what distinguishes 'stores are "
+        "the bottleneck' from 'depth 2 happens to be enough'.",
+        expect="unknown - this is the experiment",
+        may_fail=True,
+        tags=("memory", "measure-first"),
+    ),
+    DesignPoint(
+        name="dsets16",
+        edits={"dsets": 16},
+        mechanism="D-cache 64 -> 16 sets (quarter capacity)",
+        why="Forces real misses into workloads that are otherwise entirely "
+        "cache-resident. Both benchmarks currently fit, which is why the "
+        "model's missing cache has gone unpunished; this makes the miss path "
+        "matter and tests whether the model can be made to care.",
+        expect="unknown - this is the experiment",
+        may_fail=True,
+        tags=("memory", "measure-first"),
+    ),
+    DesignPoint(
+        name="dways2",
+        edits={"dways": 2},
+        mechanism="D-cache 4 -> 2 ways",
+        why="Associativity rather than capacity, so conflict misses move "
+        "independently of working-set size. Separates the two in the error "
+        "budget if dsets16 shows an effect.",
+        expect="unknown - this is the experiment",
+        may_fail=True,
+        tags=("memory", "measure-first"),
+    ),
+)
+
+#: Sweep order for the dual-issue memory investigation.
+DCACHE_ORDER = ("baseline", "dsb1", "dsb4", "dsets16", "dways2")
+
+BY_NAME.update({p.name: p for p in DCACHE_POINTS})
+
 #: Knobs that look like design points but produce no buildable core, with the
 #: RTL evidence. These are worse than an excluded point: the model responds to
 #: them, so it will happily produce a prediction that can never be checked.

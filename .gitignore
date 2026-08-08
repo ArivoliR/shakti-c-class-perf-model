@@ -11,7 +11,11 @@ results/*.out
 results/.texmf-var/
 results/missfont.log
 
-# held-out design-point sweep: build logs, simulators, and per-point RTL traces
+# Held-out design-point sweeps: build logs, simulators, and per-point RTL
+# traces. One runs-* directory per core/benchmark combination; each holds
+# hundreds of MB of commit traces and a copy of the Verilator binary, and all
+# of it is regenerable from rtl_sweep.py.
 holdout/runs/
+holdout/runs-*/
 holdout/sweep-*.log
 holdout/sensitivity.json

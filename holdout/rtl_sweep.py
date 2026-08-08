@@ -49,10 +49,24 @@ from design_points import (  # noqa: E402
 from trace import parse_app_log_metrics  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
+#: Rebound by configure() so the same harness can sweep either core. The
+#: dual-issue repo carries the same knob names (isb_*, d* cache geometry), so
+#: the only thing that differs is where the tree lives.
 REPO = HERE.parent.parent
 MAKEFILE = REPO / "makefile.inc"
 BENCH_OUT = REPO / "benchmarks" / "output"
 RUNS = HERE / "runs"
+
+
+def configure(repo_root: Path, runs_dir: Path) -> None:
+    global REPO, MAKEFILE, BENCH_OUT, RUNS, BASELINE_MAKEFILE, TOOL_PATH
+    REPO = repo_root.resolve()
+    MAKEFILE = REPO / "makefile.inc"
+    BENCH_OUT = REPO / "benchmarks" / "output"
+    RUNS = runs_dir.resolve()
+    BASELINE_MAKEFILE = RUNS / ".baseline" / "makefile.inc.orig"
+    if not MAKEFILE.exists():
+        raise SystemExit(f"no makefile.inc under {REPO}")
 #: Pristine copy of makefile.inc, saved by TreeGuard before the first build.
 #: Every variant is rendered from this, never from the working-tree file.
 BASELINE_MAKEFILE = RUNS / ".baseline" / "makefile.inc.orig"
@@ -76,8 +90,13 @@ BENCHMARKS = {
         "rtldump": False,
         "marker": "CoreMark 1.0 :",
     },
+    # ITERATIONS=1 is deliberate. fpbench is sized by its matrix dimension
+    # (N=64, a 96 KB working set) so that memory actually binds; the iteration
+    # count is not what makes it long. At ITERATIONS=100 the kernel runs 26M
+    # inner iterations and the simulator blows past the hour timeout without
+    # ever printing its marker.
     "fpbench": {
-        "make": ["fpbench", "ITERATIONS=100"],
+        "make": ["fpbench", "ITERATIONS=1"],
         "rtldump": True,
         "marker": "IPC_MEASURE",
     },
@@ -342,7 +361,27 @@ def main() -> int:
     parser.add_argument("--sim-timeout", type=int, default=3600)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--repo-root",
+        default=None,
+        help="core to sweep (default: the single-issue c-class this script lives in). "
+        "Point at ../../../c-class-dual-issue to sweep the dual-issue core.",
+    )
+    parser.add_argument(
+        "--runs-dir",
+        default=None,
+        help="where to write results; use a separate directory per core so the "
+        "two sweeps do not overwrite each other",
+    )
     args = parser.parse_args()
+
+    if args.repo_root or args.runs_dir:
+        configure(
+            Path(args.repo_root) if args.repo_root else REPO,
+            Path(args.runs_dir) if args.runs_dir else RUNS,
+        )
+        log(f"sweeping {REPO}")
+        log(f"results -> {RUNS}")
 
     names = args.points or list(DEFAULT_ORDER)
     unknown = [n for n in names if n not in BY_NAME]
