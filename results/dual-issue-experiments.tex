@@ -52,6 +52,12 @@ E+H: intra forwarding + branch, with IPC 1.2953
 versus baseline). The quad approximation did not complete/drain in the full-trace sweep and is reported as not completed, not as a measured null. The model-owned branch+branch
 opportunity count is much smaller than the defective RTL event-52 story suggests.
 
+The IPC 1.7 route analysis gives a sharper answer: IPC 1.7 is not reachable
+with the current adjacent-pair two-wide structure, because the dependence-only
+ceiling is IPC 1.6765 on CoreMark. A lookahead window raises the ceiling, but
+the conservative timed model does not convert that headroom; window 4 regresses
+to IPC 1.1922 and the best measured lookahead stack reaches only IPC 1.2554.
+
 \section*{Experiment Summary}
 
 \begin{longtable}{@{}p{0.27\linewidth}rrrrp{0.13\linewidth}@{}}
@@ -263,6 +269,119 @@ The dual-issue source was checked read-only. \texttt{stage2.bsv} allows
 through to single issue. The model's FLOAT pairing whitelist matches the RTL
 source, but there is still no dynamic dual-issue FP validation trace.
 
+\section*{IPC 1.7 Route Analysis}
+
+\paragraph{Answer.}
+IPC 1.7 is not reachable by polishing the current adjacent-pair two-wide
+structure. On the dual CoreMark trace, a perfect two-wide adjacent scheduler
+with infinite functional units, perfect branch prediction, zero memory latency,
+no queues, and no structural hazards reaches only IPC 1.6765. That is below the
+target before any real pipeline costs are reintroduced.
+
+A lookahead issue window is the first mechanism that raises the ceiling:
+two-wide window 4 reaches IPC 1.9648 and window 8 saturates at IPC 2.0000. To
+hit IPC 1.7 with window 4, the machine must deliver 86.5\% of that new ceiling.
+The actual dual RTL delivers 73.3\% of the adjacent two-wide ceiling and only
+62.5\% of the window-4 ceiling; the current model baseline delivers 71.9\% of
+the adjacent ceiling. The gap is therefore not only available ILP. It is whether
+the pipeline can cash that ILP.
+
+\paragraph{Dependence ceilings.}
+The table reports no-same-cycle-forwarding ceilings. The same-cycle-forwarding
+sanity check reaches the issue width, apart from the final partial issue group
+when the instruction count is not divisible by the width.
+
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Benchmark & Achieved IPC & 2w adj. & 2w w4 & 2w w8 & 3w adj. & 4w adj. \\
+\midrule
+CoreMark dual & 1.228 & 1.677 & 1.965 & 2.000 & 2.070 & 2.157 \\
+Dhrystone dual & 1.342 & 1.876 & 1.994 & 2.000 & 2.552 & 3.067 \\
+\texttt{fpbench} single & 0.372 & 1.981 & 2.000 & 2.000 & 2.578 & 3.182 \\
+\bottomrule
+\end{tabular}
+
+The roadmap implication is important: adjacent 4-wide raises the CoreMark
+dependence ceiling by only 28.6\% over adjacent 2-wide, despite doubling issue
+width. Two-wide window 4 reaches 1.9648, close to the adjacent 4-wide ceiling,
+so quad issue without an issue/lookahead window is a weak architectural bet.
+
+\paragraph{Full-model route sweep.}
+The dual model baseline error is 1.84\%, so any effect smaller than that is
+below model resolution and is excluded from the recommendation ranking.
+Lookahead is implemented as a conservative second-slot selector over the next
+W-1 instructions, with skipped-instruction RAW/WAR/WAW checks and an in-order
+retire buffer. This is a model experiment, not a validated RTL structure.
+
+\begin{longtable}{@{}p{0.28\linewidth}rrrrp{0.16\linewidth}@{}}
+\toprule
+Route & IPC & $\Delta$ IPC & Ceiling frac. & Candidate checks/cyc & Verdict \\
+\midrule
+\endhead
+Baseline & 1.2060 & +0.000\% & 71.9\% & 0.733 & baseline \\
+Intra-bundle ALU forwarding & 1.2812 & +6.237\% & 76.4\% & 0.716 & helped; unvalidated \\
+Decouple lockstep readiness & 1.2143 & +0.689\% & 72.4\% & 0.738 & below resolution \\
+Independent retire & 1.2060 & +0.000\% & 71.9\% & 0.733 & no modeled opportunity \\
+Symmetric slots & 1.2060 & +0.000\% & 71.9\% & 0.733 & reversal already handles adjacent pairs \\
+Second memory port & 1.2144 & +0.698\% & 72.4\% & 0.722 & below resolution \\
+Relax branch next-PC stall & 1.2060 & +0.000\% & 71.9\% & 0.733 & no modeled stall cycles \\
+Second branch unit & 1.2118 & +0.480\% & 72.3\% & 0.734 & below resolution \\
+Lookahead window 3 & 1.2144 & +0.695\% & 63.2\% & 0.957 & below resolution \\
+Lookahead window 4 & 1.1922 & -1.144\% & 60.7\% & 1.153 & regressed \\
+Lookahead window 6 & 1.1922 & -1.145\% & 59.6\% & 1.275 & regressed \\
+Lookahead window 8 & 1.1924 & -1.132\% & 59.6\% & 1.589 & regressed \\
+w4 + intra forwarding & 1.2331 & +2.246\% & 62.8\% & 1.033 & helped, worse than intra alone \\
+w4 + intra + branch & 1.2502 & +3.661\% & 63.6\% & 1.016 & helped, worse than intra alone \\
+w4 + intra + memory + branch & 1.2554 & +4.096\% & 63.9\% & 0.917 & best lookahead stack \\
+w8 + intra + branch & 1.2494 & +3.598\% & 62.5\% & 1.340 & no extra win over w4 \\
+\bottomrule
+\end{longtable}
+
+Two stack configurations were not run on the full trace because they failed to
+drain on the 200k-instruction prefix: window 4 + decoupled lockstep + intra
+forwarding + branch, and the full window-8 stack. They are reported as not
+completed, not as measured null results.
+
+\paragraph{Why lookahead did not convert.}
+The ceiling scheduler says the ILP exists, but the timed model loses it to
+pipeline coupling. Window 4 reduces modeled RAW rejects from 2,020,130 to
+1,489,994, mem+mem rejects from 729,996 to 445,877, and branch-pair
+opportunities from 159,885 to 97,591. Despite removing those issue rejections,
+cycles increase from 10,589,781 to 10,712,299. The extra candidates are not
+free: the model examines 1.153 candidates per model cycle, selects 1,490,752
+non-adjacent pairs, then must preserve older skipped instructions with an
+in-order retire buffer. The remaining binding constraints are in-order
+retirement, skipped-instruction ordering, existing queue/backpressure behavior,
+and the still-large residual RAW count.
+
+The best lookahead stack removes all modeled mem+mem rejects and cuts RAW
+rejects to 920,951, but still reaches only IPC 1.2554. Plain intra-bundle ALU
+forwarding without lookahead reaches IPC 1.2812, and the earlier adjacent
+intra+branch probe reached IPC 1.2953. So the measured route to IPC 1.7 is not
+``add shallow lookahead to this pipe.'' It would require a real decoupled issue
+queue/rename/retire structure that can extract the lookahead ceiling without
+turning skipped instructions into retirement and backpressure stalls.
+
+\paragraph{Ranking for RTL effort.}
+Only effects above the 1.84\% model-resolution floor are ranked.
+
+\begin{enumerate}
+\item Intra-bundle ALU forwarding remains the only strong low-to-medium cost
+candidate: +6.237\% alone, +7.406\% with the earlier adjacent second-branch
+probe. It is also the least validated mechanism because \texttt{bypass\_sources}
+is not a buildable RTL parameter.
+\item A true small issue queue / lookahead scheduler is the only two-wide lever
+that raises the IPC ceiling above 1.7, but the conservative model-only
+implementation regresses or underperforms. Treat this as a research direction,
+not as a ready RTL patch.
+\item Do not prioritize a second memory port, lockstep decoupling, or a second
+branch unit as standalone changes from this evidence. Their individual gains
+are below the dual model's resolution floor.
+\item Do not pursue quad issue without lookahead. The dependence ceiling says
+adjacent 4-wide is a poor use of doubled width compared with a two-wide
+lookahead window.
+\end{enumerate}
+
 \section*{Calibration Log}
 
 \begin{longtable}{@{}p{0.23\linewidth}p{0.31\linewidth}p{0.34\linewidth}@{}}
@@ -372,16 +491,18 @@ memory latency=3 & 16,155,195 & 0.7905 & -34.450\% \\
 \begin{itemize}
 \item Independent retire alone had no effect because actual lockstep stage4
 already delivers paired slots to stage5 together.
-\item The branch next-PC relaxation is unresolved: the named F config remains
-an exact no-op in this model and should not be treated as RTL evidence.
-\item Symmetric slots remains an exact no-op in this trace/model. Treat it as an
-unexpressed hypothesis, not proof that the RTL change is worthless.
+\item Branch next-PC relaxation had no modeled opportunity on this trace:
+\texttt{branch\_next\_pc\_stall\_cycles} was zero in the baseline. Treat this as
+a trace/model result, not proof that the RTL condition is impossible.
+\item Symmetric slots had no effect for adjacent two-wide CoreMark because the
+existing reversal logic already moves legal scarce-FU pairs into slot 0.
 \item Combining decoupled lockstep with intra-bundle forwarding did not drain on
 a 100k-instruction diagnostic run. The final best combination therefore excludes
 B when E is selected; this is reported as a model limitation/negative
 interaction, not hidden.
-\item Quad issue did not complete/drain in the full-trace sweep. It is reported
-as not completed rather than as a measured null.
+\item Quad issue did not complete/drain in the earlier full-trace timing sweep.
+The independent dependence-ceiling analysis still shows that adjacent 4-wide is
+much less attractive than two-wide lookahead.
 \end{itemize}
 
 \section*{Experiment Validation Coverage}
@@ -397,8 +518,8 @@ B: decouple lockstep & +0.689\% & below/near floor & Coupling logic is model-onl
 C: A+B & +1.015\% & near floor & Sub-additive; above small-effect floors but below overall mechanism floor. \\
 D: independent retire & +0.000\% & below resolution & Implemented flag has exact zero effect because upstream delivery remains paired. \\
 E: intra-bundle ALU forwarding & +6.237\% & no ground truth & Bypass/forwarding has no buildable single-issue design point. \\
-F: relax branch next-PC stall & +0.000\% & unimplemented/no-op & Exact zero; do not report as an RTL null. \\
-G: symmetric slots & +0.000\% & unimplemented/no-op & Exact zero in this trace/model; do not report as an RTL null. \\
+F: relax branch next-PC stall & +0.000\% & no modeled opportunity & Baseline branch-next-PC stall counter is zero on this trace. \\
+G: symmetric slots & +0.000\% & below resolution & Adjacent two-wide reversal already removes the modeled slot-placement cost. \\
 H: second branch unit & +0.480\% & near/below floor & Small model-owned branch-pair opportunity result. \\
 I: best combination & +5.772\% & partial & Two-issue stack; inherits E's no-ground-truth forwarding limitation. \\
 J: quad issue on best & n/a & not completed & Full-trace quad approximation did not drain/complete. \\
@@ -407,7 +528,9 @@ E+H: intra forwarding + branch & +7.406\% & partial & Best draining two-issue mo
 \bottomrule
 \end{longtable}
 
-Small-effect floors are 0.17 pp on Dhrystone and 0.64 pp on CoreMark; claims at or below that scale should be read as below model resolution.
+Small-effect floors are 0.17 pp on Dhrystone and 0.64 pp on CoreMark for the
+single-issue held-out ladder. The dual-issue CoreMark baseline error is 1.84\%,
+so dual design deltas below that threshold are below current model resolution.
 
 \section*{Recommendations}
 

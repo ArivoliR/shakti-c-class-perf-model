@@ -134,6 +134,7 @@ class PipeEntry:
     wb_kind: str = "BASE"
     stale_frontend: bool = False
     issued_cycle: int = -1
+    local_index: int = -1
     bundle_id: int = -1
     bundle_pos: int = 0
     bundle_size: int = 1
@@ -247,6 +248,15 @@ class FixedQueue:
     def pop(self) -> PipeEntry:
         self._dequeues_this_cycle += 1
         return self.items.popleft()
+
+    def pop_at(self, index: int) -> PipeEntry:
+        if index == 0:
+            return self.pop()
+        self.items.rotate(-index)
+        entry = self.items.popleft()
+        self.items.rotate(index)
+        self._dequeues_this_cycle += 1
+        return entry
 
 
 class BranchPredictor:
@@ -489,6 +499,7 @@ class Model:
         allow_branch_branch: bool = False,
         symmetric_slots: bool = False,
         intra_bundle_forwarding: bool = False,
+        pairing_window: int = 2,
         branch_next_pc_stall: bool = True,
         relax_branch_next_pc_stall: bool = False,
         wrong_path_frontend: bool = False,
@@ -575,6 +586,7 @@ class Model:
         self.allow_branch_branch = allow_branch_branch
         self.symmetric_slots = symmetric_slots
         self.intra_bundle_forwarding = intra_bundle_forwarding
+        self.pairing_window = max(2, int(pairing_window))
         self.branch_next_pc_stall = branch_next_pc_stall
         self.relax_branch_next_pc_stall = relax_branch_next_pc_stall
         self.wrong_path_frontend = wrong_path_frontend
@@ -610,6 +622,8 @@ class Model:
         self.frontend_drop_fetch_hold = 0
         self.fetch_hold_blocked_cycle = -1
         self.next_bundle_id = 0
+        self.next_retire_index = 0
+        self.retire_buffer: dict[int, PipeEntry] = {}
         self.dual_pair_bundles = 0
         self.dual_single_bundles = 0
         self.dual_one_instr_bundles = 0
@@ -617,6 +631,9 @@ class Model:
         self.queue_full_cycles: Counter[str] = Counter()
         self.dual_pair_accept_counts: Counter[str] = Counter()
         self.dual_pair_reject_counts: Counter[str] = Counter()
+        self.lookahead_candidate_checks = 0
+        self.lookahead_non_adjacent_pairs = 0
+        self.branch_next_pc_stall_cycles = 0
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
         self.redirect_this_cycle = False
@@ -722,6 +739,10 @@ class Model:
             "branch_branch_accepted": branch_branch_accepted,
             "branch_branch_opportunities": branch_branch_rejected + branch_branch_accepted,
             "mispredict": sum(1 for event in self.control_events if event.pred_mispredict),
+            "lookahead_candidate_checks": self.lookahead_candidate_checks,
+            "lookahead_candidate_checks_per_cycle": self.lookahead_candidate_checks / cycles if cycles else 0.0,
+            "lookahead_non_adjacent_pairs": self.lookahead_non_adjacent_pairs,
+            "branch_next_pc_stall_cycles": self.branch_next_pc_stall_cycles,
             "pair_bundles": self.dual_pair_bundles,
             "single_bundles": self.dual_single_bundles,
             "paired_instructions_pct": (2 * self.dual_pair_bundles)
@@ -769,6 +790,8 @@ class Model:
         self.frontend_drop_fetch_hold = 0
         self.fetch_hold_blocked_cycle = -1
         self.next_bundle_id = 0
+        self.next_retire_index = 0
+        self.retire_buffer.clear()
         self.dual_pair_bundles = 0
         self.dual_single_bundles = 0
         self.dual_one_instr_bundles = 0
@@ -776,6 +799,9 @@ class Model:
         self.queue_full_cycles.clear()
         self.dual_pair_accept_counts.clear()
         self.dual_pair_reject_counts.clear()
+        self.lookahead_candidate_checks = 0
+        self.lookahead_non_adjacent_pairs = 0
+        self.branch_next_pc_stall_cycles = 0
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
         self.redirect_this_cycle = False
@@ -911,16 +937,9 @@ class Model:
             return False
 
         first = self.q_s1s2.first()
-        issue_two = False
-        if len(self.q_s1s2) >= 2:
-            second = self.q_s1s2.peek(1)
-            if not second.stale_frontend:
-                issue_two, reason = self._shakti_pair_decision(first.insn, second.insn)
-                if issue_two:
-                    self.dual_pair_accept_counts[reason] += 1
-                else:
-                    self.dual_pair_reject_counts[reason] += 1
-        else:
+        second_index, reason = self._select_shakti_second_index(first)
+        issue_two = second_index is not None
+        if len(self.q_s1s2) < 2:
             self.dual_one_instr_bundles += 1
 
         bundle_size = 2 if issue_two else 1
@@ -933,13 +952,102 @@ class Model:
             self.dual_pair_bundles += 1
         else:
             self.dual_single_bundles += 1
-        for pos in range(bundle_size):
-            entry = self.q_s1s2.pop()
+        if issue_two:
+            assert second_index is not None
+            first_entry = self.q_s1s2.pop()
+            second_entry = self.q_s1s2.pop_at(second_index - 1)
+            selected_entries = [first_entry, second_entry]
+            if second_entry.local_index != first_entry.local_index + 1:
+                self.lookahead_non_adjacent_pairs += 1
+        else:
+            selected_entries = [self.q_s1s2.pop()]
+
+        for pos, entry in enumerate(selected_entries):
             entry.bundle_id = bundle_id
             entry.bundle_pos = pos
             entry.bundle_size = bundle_size
             self.q_s2s3.push(entry)
         return True
+
+    def _select_shakti_second_index(self, first: PipeEntry) -> tuple[Optional[int], str]:
+        if len(self.q_s1s2) < 2:
+            return None, "ONE_INSTR"
+        max_index = min(len(self.q_s1s2), self.pairing_window) - 1
+        first_reject = ""
+        for index in range(1, max_index + 1):
+            second = self.q_s1s2.peek(index)
+            if second.stale_frontend:
+                if index == 1:
+                    first_reject = "STALE"
+                continue
+            self.lookahead_candidate_checks += 1
+            can_pair, reason = self._shakti_pair_decision(first.insn, second.insn)
+            non_adjacent_trace = second.local_index != first.local_index + 1
+            if can_pair and non_adjacent_trace and not self._can_skip_for_lookahead(second.insn, 1, index):
+                can_pair = False
+                reason = f"LOOKAHEAD_ORDER:{reason}"
+            if can_pair and non_adjacent_trace and self._older_unretired_dependency_blocks(second):
+                can_pair = False
+                reason = f"LOOKAHEAD_INFLIGHT:{reason}"
+            if can_pair and non_adjacent_trace and not self._operands_available(second.insn):
+                can_pair = False
+                reason = f"LOOKAHEAD_SCOREBOARD:{reason}"
+            if can_pair:
+                self.dual_pair_accept_counts[reason] += 1
+                return index, reason
+            if index == 1:
+                first_reject = reason
+        self.dual_pair_reject_counts[first_reject or "NO_LOOKAHEAD_PAIR"] += 1
+        return None, first_reject
+
+    def _can_skip_for_lookahead(self, candidate: Instruction, start: int, stop: int) -> bool:
+        candidate_sources = set(candidate.source_regs())
+        candidate_dest = (
+            (candidate.rd_type, candidate.rd) if candidate.writes_scoreboard else None
+        )
+        for index in range(start, stop):
+            skipped = self.q_s1s2.peek(index).insn
+            skipped_sources = set(skipped.source_regs())
+            skipped_dest = (
+                (skipped.rd_type, skipped.rd) if skipped.writes_scoreboard else None
+            )
+            if skipped_dest is not None and skipped_dest in candidate_sources:
+                return False
+            if candidate_dest is not None and candidate_dest in skipped_sources:
+                return False
+            if candidate_dest is not None and skipped_dest == candidate_dest:
+                return False
+        return True
+
+    def _older_unretired_dependency_blocks(self, candidate: PipeEntry) -> bool:
+        if candidate.local_index < 0:
+            return True
+        candidate_sources = set(candidate.insn.source_regs())
+        candidate_dest = candidate.rd_key
+        for older in self._older_unretired_entries(candidate.local_index):
+            older_dest = older.rd_key
+            if older_dest is not None and older_dest in candidate_sources:
+                return True
+            if candidate_dest is not None and candidate_dest in older.insn.source_regs():
+                return True
+            if candidate_dest is not None and candidate_dest == older_dest:
+                return True
+        return False
+
+    def _older_unretired_entries(self, local_index: int) -> list[PipeEntry]:
+        entries: list[PipeEntry] = []
+        for queue in (self.q_s0s1, self.q_s1s2, self.q_s2s3, self.q_s3s4, self.q_s4s5):
+            entries.extend(
+                entry
+                for entry in queue.items
+                if self.next_retire_index <= entry.local_index < local_index
+            )
+        entries.extend(
+            entry
+            for idx, entry in self.retire_buffer.items()
+            if self.next_retire_index <= idx < local_index
+        )
+        return entries
 
     def _try_execute_shakti(self) -> bool:
         if not self.lockstep_bundles:
@@ -1087,6 +1195,8 @@ class Model:
         return True
 
     def _try_commit_shakti(self) -> bool:
+        if self._uses_reorder_retire():
+            return self._try_commit_shakti_reorder()
         if self.q_s4s5.empty():
             return False
         first = self.q_s4s5.first()
@@ -1105,6 +1215,35 @@ class Model:
         for entry in committed_entries:
             self._commit_entry(entry)
         return True
+
+    def _uses_reorder_retire(self) -> bool:
+        return self.dual_policy == "shakti" and self.pairing_window > self.num_issue
+
+    def _try_commit_shakti_reorder(self) -> bool:
+        progressed = False
+        if not self.q_s4s5.empty():
+            first = self.q_s4s5.first()
+            if first.stale_frontend:
+                self.q_s4s5.pop()
+                progressed = True
+            else:
+                bundle = self._head_bundle(self.q_s4s5)
+                if bundle:
+                    for _ in bundle:
+                        entry = self.q_s4s5.pop()
+                        if entry.local_index >= 0:
+                            self.retire_buffer[entry.local_index] = entry
+                    progressed = True
+
+        retired = 0
+        retire_limit = self.num_issue if self.atomic_pair_retire else max(1, self.commit_width)
+        while retired < retire_limit and self.next_retire_index in self.retire_buffer:
+            entry = self.retire_buffer.pop(self.next_retire_index)
+            self._commit_entry(entry)
+            self.next_retire_index += 1
+            retired += 1
+            progressed = True
+        return progressed
 
     def _head_bundle(self, queue: FixedQueue) -> list[PipeEntry]:
         if queue.empty():
@@ -1176,6 +1315,7 @@ class Model:
             trace_entry,
             prev_trace=entries[index - 1] if index > 0 else None,
             next_trace=entries[index + 1] if index + 1 < len(entries) else None,
+            local_index=index,
         )
         if trace_entry.insn.is_control:
             (
@@ -1353,7 +1493,11 @@ class Model:
         if not self.q_s1s2.empty():
             return True
         if self.relax_branch_next_pc_stall:
-            return all(self._control_successor_in_bundle(entry, bundle) for entry in controls)
+            ready = all(self._control_successor_in_bundle(entry, bundle) for entry in controls)
+            if not ready:
+                self.branch_next_pc_stall_cycles += 1
+            return ready
+        self.branch_next_pc_stall_cycles += 1
         return False
 
     def _control_successor_in_bundle(self, entry: PipeEntry, bundle: list[PipeEntry]) -> bool:
@@ -1600,6 +1744,7 @@ def main() -> int:
     )
     parser.add_argument("--symmetric-slots", action="store_true", help="Experimental: relax slot-0-only scarce-FU pairing")
     parser.add_argument("--intra-bundle-forwarding", action="store_true")
+    parser.add_argument("--pairing-window", type=int, default=2, help="Experimental dual-issue second-slot lookahead window")
     parser.add_argument(
         "--relax-branch-next-pc-stall",
         action="store_true",
@@ -1680,7 +1825,8 @@ def main() -> int:
             f"atomic_retire={int(model.atomic_pair_retire)} "
             f"branch_branch={int(model.allow_branch_branch)} "
             f"symmetric_slots={int(model.symmetric_slots)} "
-            f"intra_bundle_forwarding={int(model.intra_bundle_forwarding)}"
+            f"intra_bundle_forwarding={int(model.intra_bundle_forwarding)} "
+            f"pairing_window={model.pairing_window}"
         )
         if model.dual_pair_bundles or model.dual_single_bundles:
             paired_insts = model.dual_pair_bundles * 2
@@ -1709,6 +1855,9 @@ def main() -> int:
                 f"mem_ls={profile['mem_mem_ls']} "
                 f"mem_ss={profile['mem_mem_ss']} "
                 f"branch_branch={profile['branch_branch_opportunities']} "
+                f"lookahead_checks={profile['lookahead_candidate_checks']} "
+                f"lookahead_non_adjacent={profile['lookahead_non_adjacent_pairs']} "
+                f"branch_next_pc_stall_cycles={profile['branch_next_pc_stall_cycles']} "
                 f"mispredict={profile['mispredict']}"
             )
     if window is not None:
@@ -1790,6 +1939,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         "allow_branch_branch": args.allow_branch_branch,
         "symmetric_slots": args.symmetric_slots,
         "intra_bundle_forwarding": args.intra_bundle_forwarding,
+        "pairing_window": args.pairing_window,
         "relax_branch_next_pc_stall": args.relax_branch_next_pc_stall,
     }
     if args.dual_issue:

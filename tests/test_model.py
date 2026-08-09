@@ -188,6 +188,24 @@ def test_intra_bundle_forwarding_experiment_allows_alu_to_alu_raw_pair():
     assert dual_model(intra_bundle_forwarding=True).run(entries) == [5, 5, 6]
 
 
+def test_pairing_window_can_skip_raw_successor_for_second_slot():
+    model = dual_model(pairing_window=3)
+    packets = [
+        PipeEntry(entry(0, 0x1000, 0x00100093), local_index=0),  # addi x1, x0, 1
+        PipeEntry(entry(1, 0x1004, 0x00108113), local_index=1),  # addi x2, x1, 1
+        PipeEntry(entry(2, 0x1008, 0x00300193), local_index=2),  # addi x3, x0, 3
+    ]
+    model.q_s1s2.begin_cycle()
+    for packet in packets:
+        model.q_s1s2.push(packet)
+
+    second_index, reason = model._select_shakti_second_index(packets[0])
+
+    assert second_index == 2
+    assert reason == "ALU+ALU"
+    assert model.lookahead_candidate_checks == 2
+
+
 def test_shakti_dual_issue_memory_pairs_are_disabled_without_dual_mem():
     entries = annotate(
         [
