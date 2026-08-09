@@ -19,6 +19,9 @@ architectural behavior: it never computes register values.
 - `report.py`: renders `results/dual-issue-experiments.pdf` from sweep JSON.
 - `docs/perf_model_notes.tex`: LaTeX notes explaining the model construction.
 - `docs/perf_model_notes.pdf`: generated PDF copy of those notes.
+- `docs/shakti_c_class_perf_model_guide.md`: comprehensive guide covering
+  single issue, dual issue, CVA6 methodology, our model, validation, and how to
+  use the results.
 - `tests/`: unit tests for decode, trace parsing, and focused hazards.
 - `holdout/`: held-out RTL design-point sweep. Builds one real core per
   `BSC_DEFINES` change and scores the model on predicted-vs-measured *deltas*,
