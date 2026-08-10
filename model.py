@@ -645,7 +645,9 @@ class Model:
         self.dual_pair_bundles = 0
         self.dual_single_bundles = 0
         self.dual_one_instr_bundles = 0
-        self.stage3_stall_cycles = 0
+        self.stage3_blocked_cycles = 0
+        self.stage3_starved_cycles = 0
+        self.cycle_account = Counter()
         self.queue_full_cycles: Counter[str] = Counter()
         self.dual_pair_accept_counts: Counter[str] = Counter()
         self.dual_pair_reject_counts: Counter[str] = Counter()
@@ -709,11 +711,20 @@ class Model:
             if self.cycle > max_cycles:
                 raise RuntimeError(f"model did not drain after {max_cycles} cycles")
             self._begin_cycle()
+            commits_before = len(self.commits)
             for _ in range(self.commit_width):
                 self.try_commit()
             for _ in range(self.stage4_width):
                 self.try_stage4()
             stage3_before = len(self.q_s2s3)
+            # The RTL counter of this name fires when stage3's *input* is
+            # empty -- rl_stage3_not_firing(!rx_meta.u.notEmpty), stage3.bsv:414.
+            # That is execute STARVED. The model previously counted the
+            # opposite condition (input present, nothing consumed = execute
+            # BLOCKED) under the same name, so the two were not comparable.
+            # Both are worth having; they just need separate names.
+            if stage3_before == 0:
+                self.stage3_starved_cycles += 1
             for _ in range(self.issue_width):
                 self.try_execute()
             if (
@@ -722,15 +733,63 @@ class Model:
                 and len(self.q_s2s3) == stage3_before
                 and not self.q_s2s3.first().stale_frontend
             ):
-                self.stage3_stall_cycles += 1
+                self.stage3_blocked_cycles += 1
             for _ in range(self.decode_width):
                 self.try_decode()
             for _ in range(self.fetch_decode_width):
                 self.try_fetch_decode()
             for _ in range(self.fetch_width):
                 self.try_fetch(entries)
+            self._account_cycle(len(self.commits) - commits_before, stage3_before)
             self.cycle += 1
         return self.commits
+
+    def _account_cycle(self, retired: int, stage3_before: int) -> None:
+        """Attribute this cycle to exactly one bucket.
+
+        "The core reaches 69.6% of its ceiling" is not actionable. "X% of
+        cycles are lost to mechanism Y" is. Every cycle lands in exactly one
+        bucket and the buckets sum to the total, so the result is a budget
+        rather than a collection of overlapping counters.
+        """
+        if retired >= self.num_issue:
+            self.cycle_account["retired_full"] += 1
+            return
+        if retired > 0:
+            # Retired something, but less than the machine is wide. Blame the
+            # reason the head bundle could not be a pair.
+            self.cycle_account["retired_partial"] += 1
+            return
+        # Nothing retired at all. Rank the causes in pipeline order so a cycle
+        # is attributed to the earliest thing that could explain it.
+        if self.flush_countdown > 0 or self.redirect_this_cycle:
+            self.cycle_account["flush_redirect"] += 1
+        elif stage3_before == 0:
+            # Execute had no input: the front end did not deliver.
+            if self.q_s1s2.empty() and self.q_s0s1.empty():
+                self.cycle_account["frontend_starved"] += 1
+            else:
+                self.cycle_account["decode_blocked"] += 1
+        elif self.q_s4s5.full() or self.q_s3s4.full():
+            self.cycle_account["backpressure"] += 1
+        else:
+            self.cycle_account["execute_blocked"] += 1
+
+    def cycle_account_table(self) -> list[tuple[str, int, float]]:
+        total = sum(self.cycle_account.values())
+        order = [
+            "retired_full",
+            "retired_partial",
+            "execute_blocked",
+            "frontend_starved",
+            "decode_blocked",
+            "flush_redirect",
+            "backpressure",
+        ]
+        return [
+            (name, self.cycle_account[name], (self.cycle_account[name] / total if total else 0.0))
+            for name in order
+        ]
 
     def counter_profile(self, total_cycles: Optional[int] = None) -> dict[str, Any]:
         cycles = total_cycles if total_cycles is not None else (self.commits[-1] - self.commits[0] + 1 if self.commits else 0)
@@ -748,7 +807,9 @@ class Model:
             "dual_issued_pct_cycles": dual_issued / cycles if cycles else 0.0,
             "raw_hazard": raw_hazard,
             "one_instr": self.dual_one_instr_bundles,
-            "st3_not_firing": self.stage3_stall_cycles,
+            # RTL-comparable: stage3.bsv:414 fires when execute input is empty
+            "st3_not_firing": self.stage3_starved_cycles,
+            "st3_blocked": self.stage3_blocked_cycles,
             "mem_mem_hazard": mem_mem_hazard,
             "mem_mem_ll": mem_mem_ll,
             "mem_mem_ls": mem_mem_ls,
@@ -819,7 +880,9 @@ class Model:
         self.dual_pair_bundles = 0
         self.dual_single_bundles = 0
         self.dual_one_instr_bundles = 0
-        self.stage3_stall_cycles = 0
+        self.stage3_blocked_cycles = 0
+        self.stage3_starved_cycles = 0
+        self.cycle_account = Counter()
         self.queue_full_cycles.clear()
         self.dual_pair_accept_counts.clear()
         self.dual_pair_reject_counts.clear()
@@ -1548,6 +1611,18 @@ class Model:
         if any(self.fetch_blocked_by == entry.trace.index for entry in controls):
             return True
         if not self.q_s1s2.empty():
+            return True
+        if (
+            self.trace_len
+            and self.fetch_index >= self.trace_len
+            and self.q_s0s1.empty()
+            and self.q_s1s2.empty()
+        ):
+            # End of trace: the successor this stall waits for will never
+            # arrive, so waiting for it deadlocks the drain. Only bites when
+            # the final bundle contains a control instruction, which is why it
+            # is trace-length dependent -- but every windowed or --limit run
+            # truncates, so it can hit any of them.
             return True
         if self.relax_branch_next_pc_stall:
             ready = all(self._control_successor_in_bundle(entry, bundle) for entry in controls)

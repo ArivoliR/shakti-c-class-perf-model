@@ -1,0 +1,39 @@
+{
+  "instructions": 400000,
+  "model_cycles": 333111,
+  "ipc": 1.2008009342231267,
+  "pct_of_window2_ceiling": 0.7162546580513729,
+  "buckets": {
+    "retired_full": 150133,
+    "retired_partial": 99734,
+    "execute_blocked": 72953,
+    "frontend_starved": 308,
+    "decode_blocked": 7316,
+    "flush_redirect": 2672,
+    "backpressure": 0
+  },
+  "counters": {
+    "cycles": 333111,
+    "dual_issued": 150133,
+    "dual_issued_pct_cycles": 0.45069961664430175,
+    "raw_hazard": 62055,
+    "one_instr": 6506,
+    "st3_not_firing": 19285,
+    "st3_blocked": 63964,
+    "mem_mem_hazard": 26654,
+    "mem_mem_ll": 15834,
+    "mem_mem_ls": 10568,
+    "mem_mem_ss": 252,
+    "branch_branch_rejected": 4502,
+    "branch_branch_accepted": 0,
+    "branch_branch_opportunities": 4502,
+    "mispredict": 6400,
+    "lookahead_candidate_checks": 243361,
+    "lookahead_candidate_checks_per_cycle": 0.7305702903836859,
+    "lookahead_non_adjacent_pairs": 0,
+    "branch_next_pc_stall_cycles": 14,
+    "pair_bundles": 150133,
+    "single_bundles": 99734,
+    "paired_instructions_pct": 0.750665
+  }
+}
