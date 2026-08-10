@@ -507,6 +507,17 @@ class Model:
         sized_fifo_allows_enq_after_deq_when_full: bool = False,
         lfifo_allows_enq_after_deq_when_full: bool = True,
         stage1_split_compressed_fetch_words: bool = True,
+        # Dual-issue front end: stage1 receives one ibuswidth-wide word per
+        # cycle and keeps leftover halfwords in a residue register (rg_prev,
+        # stage1.bsv:258). Without modelling that, the model assumes it can
+        # always deliver two instructions per cycle, which makes it too
+        # optimistic about pairs that straddle a fetch-word boundary. Measured
+        # against RTL on CoreMark: two compressed instructions straddling a
+        # 64-bit word pair 44.4% of the time in hardware and 61.2% in the
+        # unmodelled version.
+        model_fetch_word_alignment: bool = False,
+        fetch_word_bytes: int = 8,
+        fetch_residue_bytes: int = 6,
     ) -> None:
         self.params = dict(locals())
         if dual_policy not in ("single", "generic", "shakti"):
@@ -592,6 +603,11 @@ class Model:
         self.wrong_path_frontend = wrong_path_frontend
         self.stale_drop_fetch_penalty = stale_drop_fetch_penalty
         self.stage1_split_compressed_fetch_words = stage1_split_compressed_fetch_words
+        self.model_fetch_word_alignment = model_fetch_word_alignment
+        self.fetch_word_bytes = fetch_word_bytes
+        self.fetch_residue_bytes = fetch_residue_bytes
+        self.fetch_avail_addr = 0
+        self.fetch_next_pc = -1
         self.predictor = BranchPredictor(
             btbdepth=btbdepth,
             bhtdepth=bhtdepth,
@@ -607,6 +623,8 @@ class Model:
         self.scoreboard: dict[tuple[str, int], int] = {}
         self.next_wawid = 0
         self.fetch_index = 0
+        self.fetch_avail_addr = 0
+        self.fetch_next_pc = -1
         self.trace_len = 0
         self.commits: list[int] = []
         self.cycle = 0
@@ -768,6 +786,10 @@ class Model:
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
         self.redirect_this_cycle = False
+        if self.model_fetch_word_alignment:
+            # One ibuswidth-wide word arrives from the I-cache per cycle, so the
+            # byte address the front end has seen advances by exactly one word.
+            self.fetch_avail_addr += self.fetch_word_bytes
 
     def _reset_runtime(self) -> None:
         for queue in self._queues.values():
@@ -775,6 +797,8 @@ class Model:
         self.scoreboard.clear()
         self.next_wawid = 0
         self.fetch_index = 0
+        self.fetch_avail_addr = 0
+        self.fetch_next_pc = -1
         self.trace_len = 0
         self.commits = []
         self.cycle = 0
@@ -1289,6 +1313,24 @@ class Model:
                 self.q_s0s1.push(self._make_stale_frontend_entry())
                 return True
             return False
+
+        if self.model_fetch_word_alignment:
+            trace = entries[self.fetch_index]
+            pc = trace.pc
+            if pc != self.fetch_next_pc:
+                # Non-sequential PC: a redirect resteered the front end, so it
+                # restarts from the word containing the new target. Record the
+                # target immediately -- otherwise this reset re-fires every
+                # cycle, fetch_avail_addr can never grow, and an instruction
+                # straddling the target word never becomes fetchable.
+                self.fetch_avail_addr = (pc & ~(self.fetch_word_bytes - 1)) + self.fetch_word_bytes
+                self.fetch_next_pc = pc
+            # An instruction can only be decoded once every one of its bytes has
+            # arrived. This is what stops the model pairing two instructions
+            # that straddle a fetch-word boundary in the same cycle.
+            if pc + trace.insn.length > self.fetch_avail_addr:
+                return False
+            self.fetch_next_pc = pc + trace.insn.length
 
         pipe_entry = self._make_pipe_entry(entries, self.fetch_index)
         fetched = 1
@@ -1947,6 +1989,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
             {
                 "num_issue": 2,
                 "dual_policy": "shakti",
+                "model_fetch_word_alignment": True,
                 "fetch_width": 2,
                 "fetch_decode_width": 2,
                 "decode_width": 1,
