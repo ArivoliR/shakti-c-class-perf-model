@@ -1228,8 +1228,21 @@ class Model:
             self.q_s4s5.pop()
             return True
         if not self.atomic_pair_retire:
-            self._commit_entry(self.q_s4s5.pop())
-            return True
+            # Relaxing atomicity means the two slots need not retire *together*,
+            # not that the machine retires half as fast. Commit stays in
+            # program order and stays num_issue-wide; only the requirement that
+            # both slots be ready in the same cycle is dropped. Retiring one
+            # entry per cycle here would model a narrower commit stage than the
+            # baseline and make the mechanism look harmful.
+            retired = 0
+            while retired < self.num_issue and not self.q_s4s5.empty():
+                head = self.q_s4s5.first()
+                if head.stale_frontend:
+                    self.q_s4s5.pop()
+                else:
+                    self._commit_entry(self.q_s4s5.pop())
+                retired += 1
+            return retired > 0
 
         bundle = self._head_bundle(self.q_s4s5)
         if not bundle:
@@ -1260,7 +1273,9 @@ class Model:
                     progressed = True
 
         retired = 0
-        retire_limit = self.num_issue if self.atomic_pair_retire else max(1, self.commit_width)
+        # Commit is num_issue-wide either way. atomic_pair_retire controls
+        # whether both slots must be ready together, not the commit width.
+        retire_limit = self.num_issue
         while retired < retire_limit and self.next_retire_index in self.retire_buffer:
             entry = self.retire_buffer.pop(self.next_retire_index)
             self._commit_entry(entry)

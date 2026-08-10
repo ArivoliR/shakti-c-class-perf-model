@@ -1,0 +1,94 @@
+{
+  "instructions": 25000,
+  "rtl_cycles": 23010,
+  "rows": [
+    {
+      "window": 2,
+      "decouple_lockstep": false,
+      "independent_retire": false,
+      "cycles": 21419,
+      "ipc": 1.1671880106447547,
+      "vs_baseline_pct": 0.0,
+      "pct_of_ceiling": 69.62051957320338,
+      "dt_accuracy": 0.9503180127205089,
+      "seconds": 0.3
+    },
+    {
+      "window": 2,
+      "decouple_lockstep": false,
+      "independent_retire": true,
+      "cycles": 21419,
+      "ipc": 1.1671880106447547,
+      "vs_baseline_pct": 0.0,
+      "pct_of_ceiling": 69.62051957320338,
+      "dt_accuracy": 0.9503180127205089,
+      "seconds": 0.3
+    },
+    {
+      "window": 2,
+      "decouple_lockstep": true,
+      "independent_retire": false,
+      "cycles": 21413,
+      "ipc": 1.1675150609442861,
+      "vs_baseline_pct": 0.028012512255474114,
+      "pct_of_ceiling": 69.64002749443998,
+      "dt_accuracy": 0.9461178447137886,
+      "seconds": 0.3
+    },
+    {
+      "window": 2,
+      "decouple_lockstep": true,
+      "independent_retire": true,
+      "cycles": 21763,
+      "ipc": 1.1487386849239536,
+      "vs_baseline_pct": -1.6060507026471822,
+      "pct_of_ceiling": 68.52005278401154,
+      "dt_accuracy": 0.8977559102364094,
+      "seconds": 0.3
+    },
+    {
+      "window": 4,
+      "decouple_lockstep": false,
+      "independent_retire": false,
+      "cycles": 21307,
+      "ipc": 1.1733233209743277,
+      "vs_baseline_pct": 0.52290022876885,
+      "pct_of_ceiling": 59.717188567504465,
+      "dt_accuracy": 0.9300772030881235,
+      "seconds": 0.4
+    },
+    {
+      "window": 4,
+      "decouple_lockstep": false,
+      "independent_retire": true,
+      "cycles": 21307,
+      "ipc": 1.1733233209743277,
+      "vs_baseline_pct": 0.52290022876885,
+      "pct_of_ceiling": 59.717188567504465,
+      "dt_accuracy": 0.9300772030881235,
+      "seconds": 0.4
+    },
+    {
+      "window": 4,
+      "decouple_lockstep": true,
+      "independent_retire": false,
+      "cycles": 21232,
+      "ipc": 1.177467972871138,
+      "vs_baseline_pct": 0.8730566319622765,
+      "pct_of_ceiling": 59.928133798408886,
+      "dt_accuracy": 0.9282771310852435,
+      "seconds": 0.4
+    },
+    {
+      "window": 4,
+      "decouple_lockstep": true,
+      "independent_retire": true,
+      "cycles": 21232,
+      "ipc": 1.177467972871138,
+      "vs_baseline_pct": 0.8730566319622765,
+      "pct_of_ceiling": 59.928133798408886,
+      "dt_accuracy": 0.9282771310852435,
+      "seconds": 0.4
+    }
+  ]
+}
