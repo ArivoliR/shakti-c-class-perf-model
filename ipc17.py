@@ -19,6 +19,7 @@ from experiment_configs import (
     F_RELAX_BRANCH_NEXT_PC,
     G_SYMMETRIC_SLOTS,
     H_SECOND_BRANCH,
+    TINY_SCHEDULER,
     merged,
 )
 from model import Model
@@ -158,6 +159,16 @@ def _route_specs() -> list[dict[str, Any]]:
     for window in (3, 4, 6, 8):
         cfg = merged({"pairing_window": window, "isb_s1s2": max(6, window)})
         specs.append(_spec(f"F_lookahead_w{window}", f"F: lookahead window {window}", cfg, "Pick second slot from a window"))
+    for window in (2, 3, 4, 6, 8):
+        cfg = merged(TINY_SCHEDULER(window))
+        specs.append(
+            _spec(
+                f"tiny_scheduler_w{window}",
+                f"Tiny scheduler window {window}",
+                cfg,
+                "Decoded issue window with independent completion and in-order retire",
+            )
+        )
 
     stacks = {
         "stack_w4_intra": merged({"pairing_window": 4}, E_INTRA_ALU_FORWARDING),
@@ -178,6 +189,11 @@ def _route_specs() -> list[dict[str, Any]]:
             B_DECOUPLE_LOCKSTEP,
             D_INDEPENDENT_RETIRE,
         ),
+        "stack_tiny_w4_intra_branch": merged(TINY_SCHEDULER(4), E_INTRA_ALU_FORWARDING, H_SECOND_BRANCH),
+        "stack_tiny_w4_intra_mem_branch": merged(
+            TINY_SCHEDULER(4), E_INTRA_ALU_FORWARDING, A_SECOND_MEMORY, H_SECOND_BRANCH
+        ),
+        "stack_tiny_w8_intra_branch": merged(TINY_SCHEDULER(8), E_INTRA_ALU_FORWARDING, H_SECOND_BRANCH),
     }
     for name, cfg in stacks.items():
         specs.append(_spec(name, name.replace("_", " "), cfg, "Measured stack, not summed"))

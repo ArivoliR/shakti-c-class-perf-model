@@ -22,6 +22,8 @@ architectural behavior: it never computes register values.
 - `docs/shakti_c_class_perf_model_guide.md`: comprehensive guide covering
   single issue, dual issue, CVA6 methodology, our model, validation, and how to
   use the results.
+- `scheduler_rtl/`: standalone SystemVerilog timing artifact for the
+  coupling-aware tiny scheduler window.
 - `tests/`: unit tests for decode, trace parsing, and focused hazards.
 - `holdout/`: held-out RTL design-point sweep. Builds one real core per
   `BSC_DEFINES` change and scores the model on predicted-vs-measured *deltas*,
@@ -84,6 +86,15 @@ For quick iteration:
 
 ```sh
 ../.venv/bin/python3 model.py ../benchmarks/output/rtl.dump --limit 100000
+```
+
+Held-out runs sometimes keep benchmark logs under names such as
+`dhrystone-app_log` instead of `app_log`. Pass that file explicitly so the model
+uses the same measured window as the RTL:
+
+```sh
+../.venv/bin/python3 model.py holdout/runs-dual/baseline/rtl.dump \
+  --app-log holdout/runs-dual/baseline/dhrystone-app_log --dual-issue
 ```
 
 For architectural prediction where no matching RTL trace exists, skip the
@@ -223,6 +234,46 @@ dual branch unless the RTL is changed:
 ../.venv/bin/python3 model.py ../benchmarks/output/rtl.dump ../benchmarks/output/rtl1.dump \
   --dual-issue --allow-branch-branch --control-issue-width 2 --predict-only
 ```
+
+## Tiny Scheduler Experiment
+
+`--tiny-scheduler-window N` is a separate experiment from `--pairing-window N`.
+The older `pairing_window` only lets stage2 choose a non-adjacent second slot
+while the head instruction still has to move. The tiny scheduler mode instead
+uses `q_s2s3` as a decoded issue window, selects ready entries from that window,
+lets them complete independently, and retires them in program order through the
+existing retire buffer.
+
+Example:
+
+```sh
+../.venv/bin/python3 model.py holdout/runs-dual/baseline/rtl.dump \
+  --app-log holdout/runs-dual/baseline/dhrystone-app_log \
+  --dual-issue --tiny-scheduler-window 4
+```
+
+The scheduler is conservative by default: it does not issue younger operations
+across older stores, control transfers, CSR/system/trap operations, or older
+memory operations. Use `--scheduler-skips-side-effects` and
+`--relaxed-scheduler-memory-order` only as speculative diagnostics, not as a
+safe RTL proposal.
+
+On the local dual Dhrystone held-out trace, the current model-only result is:
+
+```text
+baseline model: 112,131 cycles, IPC 1.4226
+tiny scheduler W=2: 103,630 cycles, IPC 1.5393  (+8.20% IPC)
+tiny scheduler W=3: 104,125 cycles, IPC 1.5320  (+7.69% IPC)
+tiny scheduler W=4: 104,125 cycles, IPC 1.5320  (+7.69% IPC)
+tiny scheduler W=6: 106,618 cycles, IPC 1.4962  (+5.17% IPC)
+tiny scheduler W=8: 106,618 cycles, IPC 1.4962  (+5.17% IPC)
+```
+
+These are not RTL-validated numbers. They are a screening result saying that
+decoupled issue/completion is worth taking to standalone timing synthesis, but
+the conservative lookahead policy is not yet cashing extra depth on Dhrystone:
+W=2 is slightly better than W=4. The matching timing artifact is in
+`scheduler_rtl/`.
 
 Because the input trace is still the single-issue committed instruction stream,
 dual-issue outputs are predicted cycle counts and IPC, not cycle-accuracy

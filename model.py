@@ -500,6 +500,9 @@ class Model:
         symmetric_slots: bool = False,
         intra_bundle_forwarding: bool = False,
         pairing_window: int = 2,
+        tiny_scheduler_window: int = 0,
+        tiny_scheduler_strict_memory_order: bool = True,
+        tiny_scheduler_respect_side_effect_order: bool = True,
         branch_next_pc_stall: bool = True,
         relax_branch_next_pc_stall: bool = False,
         wrong_path_frontend: bool = False,
@@ -526,6 +529,8 @@ class Model:
             raise ValueError("memory_pairing must be 'none', 'store_involving', or 'all'")
         if fpu_impl not in ("bsv_float", "hardfloat"):
             raise ValueError("fpu_impl must be 'bsv_float' or 'hardfloat'")
+        if tiny_scheduler_window > 0:
+            isb_s2s3 = max(isb_s2s3, int(tiny_scheduler_window))
         self.q_s0s1 = FixedQueue(
             isb_s0s1,
             allow_enq_after_deq_when_full=sized_fifo_allows_enq_after_deq_when_full,
@@ -598,6 +603,9 @@ class Model:
         self.symmetric_slots = symmetric_slots
         self.intra_bundle_forwarding = intra_bundle_forwarding
         self.pairing_window = max(2, int(pairing_window))
+        self.tiny_scheduler_window = max(0, int(tiny_scheduler_window))
+        self.tiny_scheduler_strict_memory_order = tiny_scheduler_strict_memory_order
+        self.tiny_scheduler_respect_side_effect_order = tiny_scheduler_respect_side_effect_order
         self.branch_next_pc_stall = branch_next_pc_stall
         self.relax_branch_next_pc_stall = relax_branch_next_pc_stall
         self.wrong_path_frontend = wrong_path_frontend
@@ -653,6 +661,10 @@ class Model:
         self.dual_pair_reject_counts: Counter[str] = Counter()
         self.lookahead_candidate_checks = 0
         self.lookahead_non_adjacent_pairs = 0
+        self.tiny_scheduler_candidate_checks = 0
+        self.tiny_scheduler_issue_cycles = 0
+        self.tiny_scheduler_non_head_issues = 0
+        self.tiny_scheduler_order_blocks = 0
         self.branch_next_pc_stall_cycles = 0
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
@@ -821,6 +833,11 @@ class Model:
             "lookahead_candidate_checks": self.lookahead_candidate_checks,
             "lookahead_candidate_checks_per_cycle": self.lookahead_candidate_checks / cycles if cycles else 0.0,
             "lookahead_non_adjacent_pairs": self.lookahead_non_adjacent_pairs,
+            "tiny_scheduler_candidate_checks": self.tiny_scheduler_candidate_checks,
+            "tiny_scheduler_candidate_checks_per_cycle": self.tiny_scheduler_candidate_checks / cycles if cycles else 0.0,
+            "tiny_scheduler_issue_cycles": self.tiny_scheduler_issue_cycles,
+            "tiny_scheduler_non_head_issues": self.tiny_scheduler_non_head_issues,
+            "tiny_scheduler_order_blocks": self.tiny_scheduler_order_blocks,
             "branch_next_pc_stall_cycles": self.branch_next_pc_stall_cycles,
             "pair_bundles": self.dual_pair_bundles,
             "single_bundles": self.dual_single_bundles,
@@ -888,6 +905,10 @@ class Model:
         self.dual_pair_reject_counts.clear()
         self.lookahead_candidate_checks = 0
         self.lookahead_non_adjacent_pairs = 0
+        self.tiny_scheduler_candidate_checks = 0
+        self.tiny_scheduler_issue_cycles = 0
+        self.tiny_scheduler_non_head_issues = 0
+        self.tiny_scheduler_order_blocks = 0
         self.branch_next_pc_stall_cycles = 0
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
@@ -1012,6 +1033,8 @@ class Model:
         return True
 
     def _try_decode_shakti(self) -> bool:
+        if self.tiny_scheduler_window > 0:
+            return self._try_decode_shakti_scheduler()
         if self.q_s1s2.empty():
             return False
         if self.q_s1s2.first().stale_frontend and self.stale_frontend_flushed:
@@ -1087,6 +1110,243 @@ class Model:
         self.dual_pair_reject_counts[first_reject or "NO_LOOKAHEAD_PAIR"] += 1
         return None, first_reject
 
+    def _try_decode_shakti_scheduler(self) -> bool:
+        moved = 0
+        while moved < self.num_issue and not self.q_s1s2.empty() and not self.q_s2s3.full():
+            if self.q_s1s2.first().stale_frontend and self.stale_frontend_flushed:
+                self.q_s1s2.pop()
+                moved += 1
+                continue
+            entry = self.q_s1s2.pop()
+            entry.bundle_id = -1
+            entry.bundle_pos = 0
+            entry.bundle_size = 1
+            self.q_s2s3.push(entry)
+            moved += 1
+        return moved > 0
+
+    def _try_execute_shakti_scheduler(self) -> bool:
+        if self.redirect_this_cycle or self.q_s2s3.empty():
+            return False
+        if self.q_s2s3.first().stale_frontend and self.stale_frontend_flushed:
+            self.q_s2s3.pop()
+            return True
+        if self.q_s3s4.full():
+            return False
+
+        max_select = min(self.num_issue, self.q_s3s4.space())
+        selected_indices = self._select_tiny_scheduler_indices(max_select, self.q_s2s3)
+        if not selected_indices:
+            return False
+
+        selected_entries = [self.q_s2s3.peek(index) for index in selected_indices]
+        if not self._branch_next_pc_ready(selected_entries):
+            return False
+
+        selected_by_index: dict[int, PipeEntry] = {}
+        for index in sorted(selected_indices, reverse=True):
+            selected_by_index[index] = self.q_s2s3.pop_at(index)
+
+        ordered_indices = sorted(selected_indices)
+        issued_entries = [selected_by_index[index] for index in ordered_indices]
+        if len(issued_entries) == 2:
+            self.dual_pair_bundles += 1
+            first, second = (
+                (issued_entries[0], issued_entries[1])
+                if issued_entries[0].local_index <= issued_entries[1].local_index
+                else (issued_entries[1], issued_entries[0])
+            )
+            _can_pair, reason = self._shakti_pair_decision(first.insn, second.insn)
+            self.dual_pair_accept_counts[reason] += 1
+            if ordered_indices != [0, 1]:
+                self.lookahead_non_adjacent_pairs += 1
+        else:
+            self.dual_single_bundles += 1
+        if ordered_indices and ordered_indices[0] != 0:
+            self.tiny_scheduler_non_head_issues += len(issued_entries)
+        self.tiny_scheduler_issue_cycles += 1
+
+        for entry in issued_entries:
+            insn = entry.insn
+            self._reserve_issue_resource(insn)
+            entry.issued_cycle = self.cycle
+            self._lock_scoreboard(entry)
+            entry.result_ready_cycle = self._result_ready_cycle(insn)
+            entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
+            entry.bypass_ready_cycle = self.cycle
+            entry.wb_kind = self._initial_wb_kind(insn)
+            entry.bundle_id = self.next_bundle_id
+            self.next_bundle_id += 1
+            entry.bundle_pos = 0
+            entry.bundle_size = 1
+            self.q_s3s4.push(entry)
+
+        for entry in issued_entries:
+            insn = entry.insn
+            if insn.is_control:
+                if entry.pred_mispredict:
+                    self.predictor.restore_after_mispredict(entry.pred_btb_hit, entry.pred_history)
+                    penalty = self.branch_mispredict_penalty + self._upper_half_32b_mispredict_extra(entry)
+                    self.flush_countdown = max(self.flush_countdown, penalty)
+                    if self.fetch_blocked_by == entry.trace.index:
+                        self.fetch_blocked_by = None
+                    self.stale_frontend_flushed = True
+                    self.redirect_this_cycle = True
+                self._schedule_predictor_training(entry)
+            self._reserve_multicycle_unit(insn, entry.result_ready_cycle)
+            if insn.fu == "TRAP" or insn.name == "xret" or insn.is_fence_i:
+                self.flush_countdown = max(self.flush_countdown, self.wb_flush_penalty)
+                self.redirect_this_cycle = True
+        return True
+
+    def _select_tiny_scheduler_indices(self, max_select: int, queue: Optional[FixedQueue] = None) -> list[int]:
+        if max_select <= 0:
+            return []
+        window_queue = self.q_s2s3 if queue is None else queue
+        window_len = min(len(window_queue), self.tiny_scheduler_window)
+        selected: list[int] = []
+        memory_count = 0
+        control_count = 0
+        muldiv_count = 0
+        float_count = 0
+
+        while len(selected) < max_select:
+            chosen: Optional[int] = None
+            for index in range(window_len):
+                self.tiny_scheduler_candidate_checks += 1
+                can_select, _reason = self._tiny_scheduler_can_select(
+                    index,
+                    selected,
+                    window_queue,
+                    memory_count=memory_count,
+                    control_count=control_count,
+                    muldiv_count=muldiv_count,
+                    float_count=float_count,
+                )
+                if can_select:
+                    chosen = index
+                    break
+            if chosen is None:
+                break
+            selected.append(chosen)
+            insn = window_queue.peek(chosen).insn
+            if self._uses_memory_issue_resource(insn):
+                memory_count += 1
+            if insn.is_control:
+                control_count += 1
+            if insn.is_mul or insn.is_div or insn.fu == "MULDIV":
+                muldiv_count += 1
+            if insn.is_float or insn.fu == "FLOAT":
+                float_count += 1
+        return sorted(selected)
+
+    def _tiny_scheduler_can_select(
+        self,
+        index: int,
+        selected: list[int],
+        window_queue: FixedQueue,
+        *,
+        memory_count: int,
+        control_count: int,
+        muldiv_count: int,
+        float_count: int,
+    ) -> tuple[bool, str]:
+        if index in selected:
+            return False, "SELECTED"
+        entry = window_queue.peek(index)
+        if entry.stale_frontend:
+            return False, "STALE"
+        if not self._operands_available(entry.insn):
+            return False, "OPERANDS"
+        if not self._tiny_scheduler_fu_available(
+            entry.insn,
+            memory_count=memory_count,
+            control_count=control_count,
+            muldiv_count=muldiv_count,
+            float_count=float_count,
+        ):
+            return False, "FU"
+
+        for older_index in range(index):
+            if older_index in selected:
+                continue
+            older = window_queue.peek(older_index)
+            if not self._tiny_scheduler_can_skip_older(entry, older):
+                self.tiny_scheduler_order_blocks += 1
+                return False, "ORDER"
+
+        for selected_index in selected:
+            other = window_queue.peek(selected_index)
+            first, second = (other, entry) if other.local_index <= entry.local_index else (entry, other)
+            can_pair, reason = self._shakti_pair_decision(first.insn, second.insn)
+            if not can_pair:
+                return False, f"PAIR:{reason}"
+            if self._tiny_scheduler_has_dependency(first, second):
+                return False, "PAIR_DEP"
+        return True, "OK"
+
+    def _tiny_scheduler_can_skip_older(self, candidate: PipeEntry, older: PipeEntry) -> bool:
+        if older.stale_frontend and self.stale_frontend_flushed:
+            return True
+        if self.tiny_scheduler_respect_side_effect_order and self._tiny_scheduler_is_side_effect_barrier(older.insn):
+            return False
+        if (
+            self.tiny_scheduler_strict_memory_order
+            and self._uses_memory_issue_resource(candidate.insn)
+            and self._uses_memory_issue_resource(older.insn)
+        ):
+            return False
+        return not self._tiny_scheduler_has_dependency(older, candidate)
+
+    def _tiny_scheduler_has_dependency(self, older: PipeEntry, younger: PipeEntry) -> bool:
+        older_dest = older.rd_key
+        younger_dest = younger.rd_key
+        older_sources = set(older.insn.source_regs())
+        younger_sources = set(younger.insn.source_regs())
+        if older_dest is not None and older_dest in younger_sources:
+            return True
+        if younger_dest is not None and younger_dest in older_sources:
+            return True
+        if older_dest is not None and older_dest == younger_dest:
+            return True
+        return False
+
+    def _tiny_scheduler_is_side_effect_barrier(self, insn: Instruction) -> bool:
+        return (
+            insn.is_control
+            or insn.is_csr
+            or insn.is_wfi
+            or insn.is_trap
+            or insn.fu in ("SYSTEM", "TRAP")
+            or insn.is_fence
+            or insn.is_fence_i
+            or insn.is_store
+        )
+
+    def _tiny_scheduler_fu_available(
+        self,
+        insn: Instruction,
+        *,
+        memory_count: int,
+        control_count: int,
+        muldiv_count: int,
+        float_count: int,
+    ) -> bool:
+        issue_cycle = self.cycle
+        if insn.is_div and issue_cycle < self.div_busy_until:
+            return False
+        if insn.is_float and issue_cycle < self.fpu_busy_until:
+            return False
+        if self._uses_memory_issue_resource(insn) and memory_count >= self.memory_issue_width:
+            return False
+        if insn.is_control and control_count >= self.control_issue_width:
+            return False
+        if (insn.is_mul or insn.is_div or insn.fu == "MULDIV") and muldiv_count >= 1:
+            return False
+        if (insn.is_float or insn.fu == "FLOAT") and float_count >= 1:
+            return False
+        return True
+
     def _can_skip_for_lookahead(self, candidate: Instruction, start: int, stop: int) -> bool:
         candidate_sources = set(candidate.source_regs())
         candidate_dest = (
@@ -1137,6 +1397,8 @@ class Model:
         return entries
 
     def _try_execute_shakti(self) -> bool:
+        if self.tiny_scheduler_window > 0:
+            return self._try_execute_shakti_scheduler()
         if not self.lockstep_bundles:
             return self._try_execute_shakti_decoupled()
         if self.redirect_this_cycle or self.q_s2s3.empty():
@@ -1317,23 +1579,32 @@ class Model:
         return True
 
     def _uses_reorder_retire(self) -> bool:
-        return self.dual_policy == "shakti" and self.pairing_window > self.num_issue
+        return self.dual_policy == "shakti" and (
+            self.pairing_window > self.num_issue or self.tiny_scheduler_window > 0
+        )
 
     def _try_commit_shakti_reorder(self) -> bool:
         progressed = False
-        if not self.q_s4s5.empty():
+        moved_to_retire = 0
+        move_limit = self.num_issue if (self.tiny_scheduler_window > 0 or not self.atomic_pair_retire) else 1
+        while moved_to_retire < move_limit and not self.q_s4s5.empty():
             first = self.q_s4s5.first()
             if first.stale_frontend:
                 self.q_s4s5.pop()
                 progressed = True
+                moved_to_retire += 1
             else:
                 bundle = self._head_bundle(self.q_s4s5)
-                if bundle:
-                    for _ in bundle:
-                        entry = self.q_s4s5.pop()
-                        if entry.local_index >= 0:
-                            self.retire_buffer[entry.local_index] = entry
-                    progressed = True
+                if not bundle:
+                    break
+                if moved_to_retire + len(bundle) > move_limit:
+                    break
+                for _ in bundle:
+                    entry = self.q_s4s5.pop()
+                    if entry.local_index >= 0:
+                        self.retire_buffer[entry.local_index] = entry
+                progressed = True
+                moved_to_retire += len(bundle)
 
         retired = 0
         # Commit is num_issue-wide either way. atomic_pair_retire controls
@@ -1610,6 +1881,10 @@ class Model:
             return True
         if any(self.fetch_blocked_by == entry.trace.index for entry in controls):
             return True
+        if self.tiny_scheduler_window > 0 and all(
+            self._control_successor_in_issue_window(entry) for entry in controls
+        ):
+            return True
         if not self.q_s1s2.empty():
             return True
         if (
@@ -1637,6 +1912,12 @@ class Model:
         if actual_next is None:
             return False
         return any(other is not entry and other.trace.pc == actual_next for other in bundle)
+
+    def _control_successor_in_issue_window(self, entry: PipeEntry) -> bool:
+        actual_next = entry.trace.actual_next_pc
+        if actual_next is None:
+            return False
+        return any(other is not entry and other.trace.pc == actual_next for other in self.q_s2s3.items)
 
     def _has_intra_bundle_raw(self, first: Instruction, second: Instruction) -> bool:
         if not first.writes_scoreboard:
@@ -1689,18 +1970,20 @@ class Model:
     def _uses_memory_issue_resource(self, insn: Instruction) -> bool:
         return insn.is_load or insn.is_store or insn.is_atomic or insn.is_fence or insn.is_fence_i
 
-    def _operands_available(self, insn: Instruction) -> bool:
-        if self._store_data_waits_for_load_release(insn):
+    def _operands_available(self, insn: Instruction, *, at_cycle: Optional[int] = None) -> bool:
+        cycle = self.cycle if at_cycle is None else at_cycle
+        if self._store_data_waits_for_load_release(insn, at_cycle=cycle):
             return False
         for key in insn.source_regs():
             locked_id = self.scoreboard.get(key)
             if locked_id is None:
                 continue
-            if not self._bypass_available(key, locked_id):
+            if not self._bypass_available(key, locked_id, at_cycle=cycle):
                 return False
         return True
 
-    def _bypass_available(self, key: tuple[str, int], locked_id: int) -> bool:
+    def _bypass_available(self, key: tuple[str, int], locked_id: int, *, at_cycle: Optional[int] = None) -> bool:
+        cycle = self.cycle if at_cycle is None else at_cycle
         sources = []
         if self.bypass_sources >= 1 and not self.q_s3s4.empty():
             sources.extend(self._bypass_entries(self.q_s3s4))
@@ -1709,9 +1992,9 @@ class Model:
         for entry in sources:
             if not entry.bypassable:
                 continue
-            if entry.issued_cycle == self.cycle and not self.intra_bundle_forwarding:
+            if entry.issued_cycle == cycle and not self.intra_bundle_forwarding:
                 continue
-            if entry.bypass_ready_cycle > self.cycle:
+            if entry.bypass_ready_cycle > cycle:
                 continue
             if entry.rd_key != key:
                 continue
@@ -1730,7 +2013,7 @@ class Model:
             return [bundle[1], bundle[0]]
         return bundle
 
-    def _store_data_waits_for_load_release(self, insn: Instruction) -> bool:
+    def _store_data_waits_for_load_release(self, insn: Instruction, *, at_cycle: Optional[int] = None) -> bool:
         if self.load_to_store_data_release_penalty <= 0:
             return False
         if not insn.is_store or not insn.uses_rs2:
@@ -1739,7 +2022,8 @@ class Model:
         release_cycle = self.load_release_cycle.get(key)
         if release_cycle is None:
             return False
-        return self.cycle - release_cycle < self.load_to_store_data_release_penalty
+        cycle = self.cycle if at_cycle is None else at_cycle
+        return cycle - release_cycle < self.load_to_store_data_release_penalty
 
     def _frontend_redirect_penalty(self, entry: PipeEntry) -> int:
         if not self.compressed or self.upper_half_32b_target_penalty <= 0:
@@ -1839,6 +2123,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="Only parse the first N committed instructions")
     parser.add_argument("--trace-cache", default=".trace-cache", help="Directory for parsed trace cache")
     parser.add_argument("--no-trace-cache", action="store_true", help="Disable parsed trace caching")
+    parser.add_argument("--app-log", help="Use a non-default app_log path for benchmark-window detection")
     parser.add_argument("--predict-only", action="store_true", help="Skip RTL accuracy and delta comparison")
     parser.add_argument("--no-auto-window", action="store_true", help="Use the whole parsed trace instead of the app_log IPC window")
     parser.add_argument("--window", metavar="START:END", help="Use an explicit 0-based trace index window, END exclusive")
@@ -1877,6 +2162,22 @@ def main() -> int:
     parser.add_argument("--symmetric-slots", action="store_true", help="Experimental: relax slot-0-only scarce-FU pairing")
     parser.add_argument("--intra-bundle-forwarding", action="store_true")
     parser.add_argument("--pairing-window", type=int, default=2, help="Experimental dual-issue second-slot lookahead window")
+    parser.add_argument(
+        "--tiny-scheduler-window",
+        type=int,
+        default=0,
+        help="Experimental: decoded issue window with independent completion and in-order retire",
+    )
+    parser.add_argument(
+        "--relaxed-scheduler-memory-order",
+        action="store_true",
+        help="Experimental: allow non-conflicting memory ops to pass older memory ops in tiny scheduler mode",
+    )
+    parser.add_argument(
+        "--scheduler-skips-side-effects",
+        action="store_true",
+        help="Experimental: let tiny scheduler skip older control/store/system entries",
+    )
     parser.add_argument(
         "--relax-branch-next-pc-stall",
         action="store_true",
@@ -1927,7 +2228,8 @@ def main() -> int:
             parser.error(str(exc))
         entries = parsed_entries[start:end]
     elif not args.no_auto_window and args.limit is None:
-        metrics = parse_app_log_metrics(Path(args.trace_files[0]).with_name("app_log"))
+        app_log = Path(args.app_log) if args.app_log else Path(args.trace_files[0]).with_name("app_log")
+        metrics = parse_app_log_metrics(app_log)
         if metrics is not None:
             window = detect_benchmark_window(parsed_entries, metrics)
             if window is not None:
@@ -1958,7 +2260,8 @@ def main() -> int:
             f"branch_branch={int(model.allow_branch_branch)} "
             f"symmetric_slots={int(model.symmetric_slots)} "
             f"intra_bundle_forwarding={int(model.intra_bundle_forwarding)} "
-            f"pairing_window={model.pairing_window}"
+            f"pairing_window={model.pairing_window} "
+            f"tiny_scheduler_window={model.tiny_scheduler_window}"
         )
         if model.dual_pair_bundles or model.dual_single_bundles:
             paired_insts = model.dual_pair_bundles * 2
@@ -1989,6 +2292,8 @@ def main() -> int:
                 f"branch_branch={profile['branch_branch_opportunities']} "
                 f"lookahead_checks={profile['lookahead_candidate_checks']} "
                 f"lookahead_non_adjacent={profile['lookahead_non_adjacent_pairs']} "
+                f"tiny_sched_checks={profile['tiny_scheduler_candidate_checks']} "
+                f"tiny_sched_non_head={profile['tiny_scheduler_non_head_issues']} "
                 f"branch_next_pc_stall_cycles={profile['branch_next_pc_stall_cycles']} "
                 f"mispredict={profile['mispredict']}"
             )
@@ -2072,6 +2377,9 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         "symmetric_slots": args.symmetric_slots,
         "intra_bundle_forwarding": args.intra_bundle_forwarding,
         "pairing_window": args.pairing_window,
+        "tiny_scheduler_window": args.tiny_scheduler_window,
+        "tiny_scheduler_strict_memory_order": not args.relaxed_scheduler_memory_order,
+        "tiny_scheduler_respect_side_effect_order": not args.scheduler_skips_side_effects,
         "relax_branch_next_pc_stall": args.relax_branch_next_pc_stall,
     }
     if args.dual_issue:
@@ -2120,6 +2428,18 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
                 "isb_s0s1": 4,
                 "isb_s1s2": 4,
                 "isb_s2s3": 2,
+            }
+        )
+
+    if args.dual_issue and args.tiny_scheduler_window > 0:
+        overrides.update(
+            {
+                "isb_s1s2": max(int(overrides.get("isb_s1s2", 6)), args.tiny_scheduler_window),
+                "isb_s2s3": max(int(overrides.get("isb_s2s3", 2)), args.tiny_scheduler_window),
+                "issue_width": 2,
+                "stage4_width": 2,
+                "lockstep_bundles": False,
+                "atomic_pair_retire": False,
             }
         )
 

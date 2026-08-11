@@ -19,3 +19,7 @@ holdout/runs/
 holdout/runs-*/
 holdout/sweep-*.log
 holdout/sensitivity.json
+
+# Standalone scheduler synthesis/lint products.
+scheduler_rtl/build/
+scheduler_rtl/scheduler_sweep.json

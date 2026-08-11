@@ -206,6 +206,58 @@ def test_pairing_window_can_skip_raw_successor_for_second_slot():
     assert model.lookahead_candidate_checks == 2
 
 
+def test_tiny_scheduler_can_issue_younger_ready_entries_past_blocked_alu_head():
+    model = dual_model(tiny_scheduler_window=4, lockstep_bundles=False, issue_width=2, stage4_width=2)
+    packets = [
+        PipeEntry(entry(0, 0x1000, 0x00128093), local_index=0),  # addi x1, x5, 1
+        PipeEntry(entry(1, 0x1004, 0x00200113), local_index=1),  # addi x2, x0, 2
+        PipeEntry(entry(2, 0x1008, 0x00300193), local_index=2),  # addi x3, x0, 3
+    ]
+    model.scoreboard[("x", 5)] = 9
+    model.q_s2s3.begin_cycle()
+    for packet in packets:
+        model.q_s2s3.push(packet)
+
+    assert model._select_tiny_scheduler_indices(2) == [1, 2]
+
+
+def test_tiny_scheduler_does_not_skip_blocked_side_effect_head():
+    model = dual_model(tiny_scheduler_window=4, lockstep_bundles=False, issue_width=2, stage4_width=2)
+    packets = [
+        PipeEntry(entry(0, 0x1000, 0x00503023), local_index=0),  # sd x5, 0(x0)
+        PipeEntry(entry(1, 0x1004, 0x00200113), local_index=1),  # addi x2, x0, 2
+    ]
+    model.scoreboard[("x", 5)] = 9
+    model.q_s2s3.begin_cycle()
+    for packet in packets:
+        model.q_s2s3.push(packet)
+
+    assert model._select_tiny_scheduler_indices(2) == []
+    assert model.tiny_scheduler_order_blocks > 0
+
+
+def test_tiny_scheduler_preserves_in_order_commit_after_non_head_issue():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00003283),  # ld x5, 0(x0)
+            entry(1, 0x1004, 0x00128093),  # addi x1, x5, 1
+            entry(2, 0x1008, 0x00200113),  # addi x2, x0, 2
+            entry(3, 0x100C, 0x00300193),  # addi x3, x0, 3
+        ]
+    )
+
+    cycles = dual_model(
+        tiny_scheduler_window=4,
+        lockstep_bundles=False,
+        issue_width=2,
+        stage4_width=2,
+        load_hit_latency=3,
+    ).run(entries)
+
+    assert len(cycles) == len(entries)
+    assert cycles == sorted(cycles)
+
+
 def test_shakti_dual_issue_memory_pairs_are_disabled_without_dual_mem():
     entries = annotate(
         [

@@ -42,6 +42,7 @@ BASELINE_DUAL: dict[str, Any] = {
     "allow_branch_branch": False,
     "symmetric_slots": False,
     "intra_bundle_forwarding": False,
+    "tiny_scheduler_window": 0,
 }
 
 
@@ -84,6 +85,19 @@ H_SECOND_BRANCH = {
     "allow_branch_branch": True,
     "control_issue_width": 2,
 }
+
+def TINY_SCHEDULER(window: int) -> dict[str, Any]:
+    return {
+        "tiny_scheduler_window": window,
+        "isb_s1s2": max(6, window),
+        "isb_s2s3": window,
+        # The scheduler models a tiny issue queue with independent completion
+        # and in-order retirement, not the delivered lockstep vector pipe.
+        "lockstep_bundles": False,
+        "issue_width": 2,
+        "stage4_width": 2,
+        "atomic_pair_retire": False,
+    }
 
 
 EXTRA_COMBINATIONS: list[Experiment] = [
