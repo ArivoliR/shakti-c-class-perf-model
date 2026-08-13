@@ -1,0 +1,14 @@
+{
+  "label": "CoreMark",
+  "instructions": 3000000,
+  "memory_ops": 673949,
+  "cache_kb": 16,
+  "misses": 61,
+  "miss_rate": 9.051129981645495e-05,
+  "stride_covered": 21,
+  "stride_coverage": 0.3442622950819672,
+  "mem_mem_pairs": 259661,
+  "same_line": 65698,
+  "bank_conflict": 26552,
+  "regime": "BANKING (hit-bound)"
+}

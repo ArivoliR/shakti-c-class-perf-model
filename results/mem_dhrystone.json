@@ -1,0 +1,14 @@
+{
+  "label": "Dhrystone",
+  "instructions": 267061,
+  "memory_ops": 92280,
+  "cache_kb": 16,
+  "misses": 45,
+  "miss_rate": 0.00048764629388816646,
+  "stride_covered": 6,
+  "stride_coverage": 0.13333333333333333,
+  "mem_mem_pairs": 34342,
+  "same_line": 11623,
+  "bank_conflict": 500,
+  "regime": "BANKING (hit-bound)"
+}

@@ -1,0 +1,45 @@
+{
+  "label": "Dhrystone",
+  "instructions": 267061,
+  "memory_ops": 92280,
+  "mem_mem_pairs": 34342,
+  "same_line_pairs": 11623,
+  "schemes": {
+    "word-2banks  (addr[3])": {
+      "conflicts": 21156,
+      "co_issuable": 13186,
+      "rate": 0.38396133014967093,
+      "rate_with_line_merge": 0.5170345349717547
+    },
+    "2word-2banks (addr[4])": {
+      "conflicts": 23417,
+      "co_issuable": 10925,
+      "rate": 0.318123580455419,
+      "rate_with_line_merge": 0.5032613126783531
+    },
+    "line-2banks  (addr[6])": {
+      "conflicts": 14666,
+      "co_issuable": 19676,
+      "rate": 0.5729427523149496,
+      "rate_with_line_merge": 0.911391299283676
+    },
+    "word-4banks  (addr[4:3])": {
+      "conflicts": 15079,
+      "co_issuable": 19263,
+      "rate": 0.5609166618135228,
+      "rate_with_line_merge": 0.6199405975190728
+    },
+    "2word-4banks (addr[5:4])": {
+      "conflicts": 9404,
+      "co_issuable": 24938,
+      "rate": 0.7261662104711432,
+      "rate_with_line_merge": 0.882155960631297
+    },
+    "line-4banks  (addr[7:6])": {
+      "conflicts": 12123,
+      "co_issuable": 22219,
+      "rate": 0.6469920214314833,
+      "rate_with_line_merge": 0.9854405684002097
+    }
+  }
+}

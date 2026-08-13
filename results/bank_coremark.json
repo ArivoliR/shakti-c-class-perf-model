@@ -1,0 +1,45 @@
+{
+  "label": "CoreMark",
+  "instructions": 3000000,
+  "memory_ops": 673949,
+  "mem_mem_pairs": 259661,
+  "same_line_pairs": 65698,
+  "schemes": {
+    "word-2banks  (addr[3])": {
+      "conflicts": 175213,
+      "co_issuable": 84448,
+      "rate": 0.32522404211645184,
+      "rate_with_line_merge": 0.5675322824759975
+    },
+    "2word-2banks (addr[4])": {
+      "conflicts": 161586,
+      "co_issuable": 98075,
+      "rate": 0.3777040063775461,
+      "rate_with_line_merge": 0.6203627036790277
+    },
+    "line-2banks  (addr[6])": {
+      "conflicts": 157616,
+      "co_issuable": 102045,
+      "rate": 0.39299317186639504,
+      "rate_with_line_merge": 0.6460076792433211
+    },
+    "word-4banks  (addr[4:3])": {
+      "conflicts": 117675,
+      "co_issuable": 141986,
+      "rate": 0.5468129599747363,
+      "rate_with_line_merge": 0.7839336673585945
+    },
+    "2word-4banks (addr[5:4])": {
+      "conflicts": 109162,
+      "co_issuable": 150499,
+      "rate": 0.5795980143340741,
+      "rate_with_line_merge": 0.818636606960614
+    },
+    "line-4banks  (addr[7:6])": {
+      "conflicts": 92250,
+      "co_issuable": 167411,
+      "rate": 0.6447290890815333,
+      "rate_with_line_merge": 0.8977435964584592
+    }
+  }
+}

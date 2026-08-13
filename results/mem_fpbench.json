@@ -1,0 +1,14 @@
+{
+  "label": "fpbench N=64 (matmul, 96KB)",
+  "instructions": 3618733,
+  "memory_ops": 564742,
+  "cache_kb": 16,
+  "misses": 274460,
+  "miss_rate": 0.4859918334389863,
+  "stride_covered": 265792,
+  "stride_coverage": 0.9684179844057422,
+  "mem_mem_pairs": 266318,
+  "same_line": 64,
+  "bank_conflict": 69632,
+  "regime": "PREFETCH (miss-bound)"
+}
