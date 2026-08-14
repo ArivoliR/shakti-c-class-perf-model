@@ -115,6 +115,16 @@ def _bsv_float_sqrt_latency(fpman: int) -> int:
     return 1 + (fpman3 - 1)
 
 
+
+def _first_addr(entry) -> Optional[int]:
+    """Effective address of a PipeEntry's memory access, if the trace has one."""
+    trace = getattr(entry, "trace", None)
+    if trace is None:
+        return None
+    addrs = getattr(trace, "mem_addresses", None)
+    return addrs[0] if addrs else None
+
+
 @dataclass(slots=True)
 class PipeEntry:
     trace: TraceEntry
@@ -494,6 +504,9 @@ class Model:
         control_issue_width: int = 1,
         dual_mem: bool = False,
         memory_pairing: str = "none",
+        mem_banks: int = 4,
+        bank_shift: int = 6,
+        bank_merge_same_line: bool = False,
         lockstep_bundles: bool = True,
         atomic_pair_retire: bool = True,
         allow_branch_branch: bool = False,
@@ -525,8 +538,10 @@ class Model:
         self.params = dict(locals())
         if dual_policy not in ("single", "generic", "shakti"):
             raise ValueError("dual_policy must be 'single', 'generic', or 'shakti'")
-        if memory_pairing not in ("none", "store_involving", "all"):
-            raise ValueError("memory_pairing must be 'none', 'store_involving', or 'all'")
+        if memory_pairing not in ("none", "store_involving", "all", "banked"):
+            raise ValueError(
+                "memory_pairing must be 'none', 'store_involving', 'all' or 'banked'"
+            )
         if fpu_impl not in ("bsv_float", "hardfloat"):
             raise ValueError("fpu_impl must be 'bsv_float' or 'hardfloat'")
         if tiny_scheduler_window > 0:
@@ -597,6 +612,9 @@ class Model:
         self.control_issue_width = control_issue_width
         self.dual_mem = dual_mem
         self.memory_pairing = "store_involving" if dual_mem and memory_pairing == "none" else memory_pairing
+        self.mem_banks = max(1, int(mem_banks))
+        self.bank_shift = int(bank_shift)
+        self.bank_merge_same_line = bool(bank_merge_same_line)
         self.lockstep_bundles = lockstep_bundles
         self.atomic_pair_retire = atomic_pair_retire
         self.allow_branch_branch = allow_branch_branch
@@ -1091,7 +1109,9 @@ class Model:
                     first_reject = "STALE"
                 continue
             self.lookahead_candidate_checks += 1
-            can_pair, reason = self._shakti_pair_decision(first.insn, second.insn)
+            can_pair, reason = self._shakti_pair_decision(
+                first.insn, second.insn, _first_addr(first), _first_addr(second)
+            )
             non_adjacent_trace = second.local_index != first.local_index + 1
             if can_pair and non_adjacent_trace and not self._can_skip_for_lookahead(second.insn, 1, index):
                 can_pair = False
@@ -1156,7 +1176,9 @@ class Model:
                 if issued_entries[0].local_index <= issued_entries[1].local_index
                 else (issued_entries[1], issued_entries[0])
             )
-            _can_pair, reason = self._shakti_pair_decision(first.insn, second.insn)
+            _can_pair, reason = self._shakti_pair_decision(
+                first.insn, second.insn, _first_addr(first), _first_addr(second)
+            )
             self.dual_pair_accept_counts[reason] += 1
             if ordered_indices != [0, 1]:
                 self.lookahead_non_adjacent_pairs += 1
@@ -1278,7 +1300,9 @@ class Model:
         for selected_index in selected:
             other = window_queue.peek(selected_index)
             first, second = (other, entry) if other.local_index <= entry.local_index else (entry, other)
-            can_pair, reason = self._shakti_pair_decision(first.insn, second.insn)
+            can_pair, reason = self._shakti_pair_decision(
+                first.insn, second.insn, _first_addr(first), _first_addr(second)
+            )
             if not can_pair:
                 return False, f"PAIR:{reason}"
             if self._tiny_scheduler_has_dependency(first, second):
@@ -1788,7 +1812,13 @@ class Model:
     def _can_pair_shakti(self, first: Instruction, second: Instruction) -> bool:
         return self._shakti_pair_decision(first, second)[0]
 
-    def _shakti_pair_decision(self, first: Instruction, second: Instruction) -> tuple[bool, str]:
+    def _shakti_pair_decision(
+        self,
+        first: Instruction,
+        second: Instruction,
+        first_addr: Optional[int] = None,
+        second_addr: Optional[int] = None,
+    ) -> tuple[bool, str]:
         first_kind = self._shakti_pair_kind(first)
         second_kind = self._shakti_pair_kind(second)
         pair_name = f"{first_kind}+{second_kind}"
@@ -1804,6 +1834,22 @@ class Model:
                 return True, memory_name
             if self.memory_pairing == "store_involving":
                 return (first.is_store or second.is_store), memory_name
+            if self.memory_pairing == "banked":
+                # A banked D-cache keeps one port per bank, so two accesses
+                # proceed together only if they fall in different banks. This
+                # needs the effective addresses, which the commit trace records
+                # -- without them we cannot tell, so refuse rather than guess.
+                if first_addr is None or second_addr is None:
+                    return False, f"{memory_name}:NOADDR"
+                fb = (first_addr >> self.bank_shift) % self.mem_banks
+                sb = (second_addr >> self.bank_shift) % self.mem_banks
+                if fb != sb:
+                    return True, f"{memory_name}:BANK_OK"
+                if self.bank_merge_same_line and (first_addr >> 6) == (second_addr >> 6):
+                    # Same line always means same bank, so banking can never
+                    # help -- but one wide read serves both accesses.
+                    return True, f"{memory_name}:LINE_MERGE"
+                return False, f"{memory_name}:BANK_CONFLICT"
             return False, memory_name
         if self.symmetric_slots and self._symmetric_slots_can_pair(first_kind, second_kind):
             return True, pair_name
@@ -2136,11 +2182,14 @@ def main() -> int:
     parser.add_argument("--stage4-width", type=int)
     parser.add_argument("--commit-width", type=int)
     parser.add_argument("--memory-issue-width", type=int)
+    parser.add_argument("--mem-banks", type=int, default=4)
+    parser.add_argument("--bank-shift", type=int, default=6, help="6 = line-interleaved")
+    parser.add_argument("--bank-merge-same-line", action="store_true")
     parser.add_argument("--control-issue-width", type=int)
     parser.add_argument("--dual-mem", action="store_true", help="Allow the gated dual_mem memory pairing rule")
     parser.add_argument(
         "--memory-pairing",
-        choices=("none", "store_involving", "all"),
+        choices=("none", "store_involving", "all", "banked"),
         default=None,
         help="Experimental MEM+MEM pairing policy",
     )
@@ -2368,6 +2417,9 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         # enable_bpu from makefile.inc, which keeps static-not-taken behaviour.
         "static_not_taken_when_disabled": False,
         "dual_mem": args.dual_mem,
+        "mem_banks": args.mem_banks,
+        "bank_shift": args.bank_shift,
+        "bank_merge_same_line": args.bank_merge_same_line,
         "memory_pairing": args.memory_pairing
         if args.memory_pairing is not None
         else ("store_involving" if args.dual_mem else "none"),
