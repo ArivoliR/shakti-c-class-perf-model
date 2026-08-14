@@ -1,0 +1,42 @@
+{
+  "label": "CoreMark",
+  "instructions": 3000000,
+  "total_cycles": 2443307,
+  "l1_kb": 16,
+  "l2_kb": 512,
+  "l2_ways": 16,
+  "l1_misses": 61,
+  "l2_hits": 0,
+  "l2_misses": 61,
+  "l2_hit_rate": 0.0,
+  "mean_gap_hit": 0.9971968635737689,
+  "mean_gap_miss": 9.655737704918034,
+  "observed_penalty": 8.658540841344264,
+  "savings_by_l2_latency": {
+    "2": {
+      "per_hit": 6.658540841344264,
+      "saved": 0.0,
+      "pct": 0.0
+    },
+    "4": {
+      "per_hit": 4.658540841344264,
+      "saved": 0.0,
+      "pct": 0.0
+    },
+    "8": {
+      "per_hit": 0.6585408413442639,
+      "saved": 0.0,
+      "pct": 0.0
+    },
+    "12": {
+      "per_hit": 0.0,
+      "saved": 0.0,
+      "pct": 0.0
+    },
+    "16": {
+      "per_hit": 0.0,
+      "saved": 0.0,
+      "pct": 0.0
+    }
+  }
+}
