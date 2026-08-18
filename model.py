@@ -6,7 +6,7 @@ rtldump. It models timing and hazards, not architectural data values.
 
 from __future__ import annotations
 
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 import argparse
@@ -114,6 +114,54 @@ def _bsv_float_sqrt_latency(fpman: int) -> int:
     fpman3 = fpman + 3
     return 1 + (fpman3 - 1)
 
+
+
+
+class DataCache:
+    """Set-associative LRU model of the C-class D-cache.
+
+    Geometry comes from makefile.inc: dsets x dways, line = dwords*dblocks
+    bytes. The model exists only to decide hit or miss -- it never holds data,
+    so it stays a timing model rather than a functional one.
+
+    The miss penalty is MEASURED from the RTL commit trace, not fitted: on the
+    matmul kernel the mean inter-commit gap after a missing access is 10.73
+    cycles against 1.26 after a hit, giving ~9.5 cycles. That figure is a
+    property of this SoC -- test_soc/Soc.bsv backs main memory with a BRAM over
+    AXI4, not a DRAM model -- so it is exposed as a parameter and should be
+    swept, not trusted as universal.
+    """
+
+    __slots__ = ("sets", "ways", "shift", "tags", "hits", "misses")
+
+    def __init__(self, sets: int, ways: int, line_bytes: int):
+        self.sets = max(1, sets)
+        self.ways = max(1, ways)
+        self.shift = max(1, line_bytes).bit_length() - 1
+        self.tags: list[OrderedDict] = [OrderedDict() for _ in range(self.sets)]
+        self.hits = 0
+        self.misses = 0
+
+    def clear(self) -> None:
+        for way in self.tags:
+            way.clear()
+        self.hits = 0
+        self.misses = 0
+
+    def access(self, addr: int) -> bool:
+        block = addr >> self.shift
+        idx = block % self.sets
+        tag = block // self.sets
+        way = self.tags[idx]
+        if tag in way:
+            way.move_to_end(tag)
+            self.hits += 1
+            return True
+        if len(way) >= self.ways:
+            way.popitem(last=False)
+        way[tag] = True
+        self.misses += 1
+        return False
 
 
 def _first_addr(entry) -> Optional[int]:
@@ -464,6 +512,14 @@ class Model:
         mul_latency: int = 2,
         div_latency: int = 32,
         load_hit_latency: int = 0,
+        # D-cache miss modelling. Off by default so single-issue results,
+        # which are calibrated without it, are untouched.
+        model_dcache: bool = False,
+        dcache_sets: int = 64,
+        dcache_ways: int = 4,
+        dcache_line_bytes: int = 64,
+        dcache_miss_penalty: int = 9,
+
         store_hit_latency: int = 0,
         csr_latency: int = 1,
         fpu_impl: str = "bsv_float",
@@ -578,6 +634,10 @@ class Model:
         self.mul_latency = mul_latency
         self.div_latency = div_latency
         self.load_hit_latency = load_hit_latency
+        self.model_dcache = model_dcache
+        self.dcache_miss_penalty = int(dcache_miss_penalty)
+        self.dcache = DataCache(dcache_sets, dcache_ways, dcache_line_bytes)
+        self.dcache_busy_until = 0
         self.store_hit_latency = store_hit_latency
         self.csr_latency = csr_latency
         self.fpu_impl = fpu_impl
@@ -634,6 +694,8 @@ class Model:
         self.fetch_residue_bytes = fetch_residue_bytes
         self.fetch_avail_addr = 0
         self.fetch_next_pc = -1
+        self.dcache.clear()
+        self.dcache_busy_until = 0
         self.predictor = BranchPredictor(
             btbdepth=btbdepth,
             bhtdepth=bhtdepth,
@@ -651,6 +713,8 @@ class Model:
         self.fetch_index = 0
         self.fetch_avail_addr = 0
         self.fetch_next_pc = -1
+        self.dcache.clear()
+        self.dcache_busy_until = 0
         self.trace_len = 0
         self.commits: list[int] = []
         self.cycle = 0
@@ -895,6 +959,8 @@ class Model:
         self.fetch_index = 0
         self.fetch_avail_addr = 0
         self.fetch_next_pc = -1
+        self.dcache.clear()
+        self.dcache_busy_until = 0
         self.trace_len = 0
         self.commits = []
         self.cycle = 0
@@ -984,7 +1050,7 @@ class Model:
         self._reserve_issue_resource(insn)
         entry.issued_cycle = self.cycle
         self._lock_scoreboard(entry)
-        entry.result_ready_cycle = self._result_ready_cycle(insn)
+        entry.result_ready_cycle = self._result_ready_cycle(insn, entry)
         entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
         entry.bypass_ready_cycle = self.cycle
         entry.wb_kind = self._initial_wb_kind(insn)
@@ -1193,7 +1259,7 @@ class Model:
             self._reserve_issue_resource(insn)
             entry.issued_cycle = self.cycle
             self._lock_scoreboard(entry)
-            entry.result_ready_cycle = self._result_ready_cycle(insn)
+            entry.result_ready_cycle = self._result_ready_cycle(insn, entry)
             entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
             entry.bypass_ready_cycle = self.cycle
             entry.wb_kind = self._initial_wb_kind(insn)
@@ -1457,7 +1523,7 @@ class Model:
             self._reserve_issue_resource(insn)
             entry.issued_cycle = self.cycle
             self._lock_scoreboard(entry)
-            entry.result_ready_cycle = self._result_ready_cycle(insn)
+            entry.result_ready_cycle = self._result_ready_cycle(insn, entry)
             entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
             entry.bypass_ready_cycle = self.cycle
             entry.wb_kind = self._initial_wb_kind(insn)
@@ -1507,7 +1573,7 @@ class Model:
         self._reserve_issue_resource(insn)
         entry.issued_cycle = self.cycle
         self._lock_scoreboard(entry)
-        entry.result_ready_cycle = self._result_ready_cycle(insn)
+        entry.result_ready_cycle = self._result_ready_cycle(insn, entry)
         entry.bypassable = insn.writes_scoreboard and self._is_base_result_available_in_s3s4(insn)
         entry.bypass_ready_cycle = self.cycle
         entry.wb_kind = self._initial_wb_kind(insn)
@@ -1995,8 +2061,16 @@ class Model:
             return self.cycle >= self.div_busy_until
         if insn.is_float and self.cycle < self.fpu_busy_until:
             return False
-        if self._uses_memory_issue_resource(insn) and self.memory_issues_this_cycle >= self.memory_issue_width:
-            return False
+        if self._uses_memory_issue_resource(insn):
+            if self.memory_issues_this_cycle >= self.memory_issue_width:
+                return False
+            # A miss does not merely delay its own result -- it occupies the
+            # cache while the line fills, so every later memory op waits too.
+            # Modelling only the result latency lets the cost hide behind
+            # independent work, which is why adding 1.6M cycles of miss
+            # latency moved the total by only 42k.
+            if self.model_dcache and self.cycle < self.dcache_busy_until:
+                return False
         if insn.is_control and self.control_issues_this_cycle >= self.control_issue_width:
             return False
         return True
@@ -2117,7 +2191,12 @@ class Model:
         if key in self.scoreboard and self.scoreboard.get(key) == entry.scoreboard_id:
             del self.scoreboard[key]
 
-    def _result_ready_cycle(self, insn: Instruction) -> int:
+    def _result_ready_cycle(self, insn: Instruction, entry: Optional[PipeEntry] = None) -> int:
+        if self.model_dcache and entry is not None and (insn.is_load or insn.is_store or insn.is_atomic):
+            addr = _first_addr(entry)
+            if addr is not None and not self.dcache.access(addr):
+                self.dcache_busy_until = self.cycle + self.dcache_miss_penalty
+                return self.cycle + 1 + self.load_hit_latency + self.dcache_miss_penalty
         if insn.is_load or insn.is_atomic:
             return self.cycle + 1 + self.load_hit_latency
         if insn.is_store or insn.is_fence or insn.is_fence_i:
