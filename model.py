@@ -637,7 +637,7 @@ class Model:
         self.model_dcache = model_dcache
         self.dcache_miss_penalty = int(dcache_miss_penalty)
         self.dcache = DataCache(dcache_sets, dcache_ways, dcache_line_bytes)
-        self.dcache_busy_until = 0
+        self.dcache_bank_busy: list[int] = [0] * max(1, mem_banks)
         self.store_hit_latency = store_hit_latency
         self.csr_latency = csr_latency
         self.fpu_impl = fpu_impl
@@ -695,7 +695,7 @@ class Model:
         self.fetch_avail_addr = 0
         self.fetch_next_pc = -1
         self.dcache.clear()
-        self.dcache_busy_until = 0
+        self.dcache_bank_busy = [0] * len(self.dcache_bank_busy)
         self.predictor = BranchPredictor(
             btbdepth=btbdepth,
             bhtdepth=bhtdepth,
@@ -714,7 +714,7 @@ class Model:
         self.fetch_avail_addr = 0
         self.fetch_next_pc = -1
         self.dcache.clear()
-        self.dcache_busy_until = 0
+        self.dcache_bank_busy = [0] * len(self.dcache_bank_busy)
         self.trace_len = 0
         self.commits: list[int] = []
         self.cycle = 0
@@ -960,7 +960,7 @@ class Model:
         self.fetch_avail_addr = 0
         self.fetch_next_pc = -1
         self.dcache.clear()
-        self.dcache_busy_until = 0
+        self.dcache_bank_busy = [0] * len(self.dcache_bank_busy)
         self.trace_len = 0
         self.commits = []
         self.cycle = 0
@@ -1037,7 +1037,7 @@ class Model:
         if self.q_s3s4.full():
             return False
         insn = entry.insn
-        if not self._fu_ready(insn):
+        if not self._fu_ready(insn, entry):
             return False
         if not self._operands_available(insn):
             return False
@@ -1558,7 +1558,7 @@ class Model:
             return False
 
         insn = entry.insn
-        if not self._fu_ready(insn):
+        if not self._fu_ready(insn, entry):
             return False
         if not self._branch_next_pc_ready([entry]):
             return False
@@ -1979,6 +1979,17 @@ class Model:
                 memory_count += 1
                 if memory_count > self.memory_issue_width:
                     return False
+                # The dual-issue path had no D-cache occupancy check at all, so
+                # a miss delayed only its own result and never blocked later
+                # memory ops. Per-bank, so two accesses in different banks are
+                # free to proceed -- that is what banking buys.
+                if self.model_dcache:
+                    addr = _first_addr(entry)
+                    if addr is None:
+                        if any(self.cycle < b for b in self.dcache_bank_busy):
+                            return False
+                    elif self.cycle < self.dcache_bank_busy[self._dcache_bank_of(addr)]:
+                        return False
             if insn.is_control:
                 control_count += 1
                 if control_count > self.control_issue_width:
@@ -2056,7 +2067,10 @@ class Model:
             return "ALU"
         return "OTHER"
 
-    def _fu_ready(self, insn: Instruction) -> bool:
+    def _dcache_bank_of(self, addr: int) -> int:
+        return (addr >> self.bank_shift) % len(self.dcache_bank_busy)
+
+    def _fu_ready(self, insn: Instruction, entry: Optional[PipeEntry] = None) -> bool:
         if insn.is_div:
             return self.cycle >= self.div_busy_until
         if insn.is_float and self.cycle < self.fpu_busy_until:
@@ -2069,8 +2083,17 @@ class Model:
             # Modelling only the result latency lets the cost hide behind
             # independent work, which is why adding 1.6M cycles of miss
             # latency moved the total by only 42k.
-            if self.model_dcache and self.cycle < self.dcache_busy_until:
-                return False
+            if self.model_dcache:
+                # Occupancy is PER BANK. A single global counter would let the
+                # first op of a pair block its own bundle-mate in the same
+                # cycle, which defeats banking by construction -- that bug cost
+                # 149k cycles and made banking look 10% harmful.
+                addr = _first_addr(entry) if entry is not None else None
+                if addr is None:
+                    if any(self.cycle < b for b in self.dcache_bank_busy):
+                        return False
+                elif self.cycle < self.dcache_bank_busy[self._dcache_bank_of(addr)]:
+                    return False
         if insn.is_control and self.control_issues_this_cycle >= self.control_issue_width:
             return False
         return True
@@ -2195,7 +2218,9 @@ class Model:
         if self.model_dcache and entry is not None and (insn.is_load or insn.is_store or insn.is_atomic):
             addr = _first_addr(entry)
             if addr is not None and not self.dcache.access(addr):
-                self.dcache_busy_until = self.cycle + self.dcache_miss_penalty
+                self.dcache_bank_busy[self._dcache_bank_of(addr)] = (
+                    self.cycle + self.dcache_miss_penalty
+                )
                 return self.cycle + 1 + self.load_hit_latency + self.dcache_miss_penalty
         if insn.is_load or insn.is_atomic:
             return self.cycle + 1 + self.load_hit_latency
