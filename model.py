@@ -568,6 +568,7 @@ class Model:
         allow_branch_branch: bool = False,
         symmetric_slots: bool = False,
         intra_bundle_forwarding: bool = False,
+        forwarding_restrict_double_add: bool = False,
         pairing_window: int = 2,
         tiny_scheduler_window: int = 0,
         tiny_scheduler_strict_memory_order: bool = True,
@@ -680,6 +681,7 @@ class Model:
         self.allow_branch_branch = allow_branch_branch
         self.symmetric_slots = symmetric_slots
         self.intra_bundle_forwarding = intra_bundle_forwarding
+        self.forwarding_restrict_double_add = forwarding_restrict_double_add
         self.pairing_window = max(2, int(pairing_window))
         self.tiny_scheduler_window = max(0, int(tiny_scheduler_window))
         self.tiny_scheduler_strict_memory_order = tiny_scheduler_strict_memory_order
@@ -1931,6 +1933,30 @@ class Model:
             return True, pair_name
         return False, pair_name
 
+    #: Operations with no carry chain: logic, shift, and lui. Synthesis puts a
+    #: 64-bit adder at depth ~128 and a barrel shifter at ~6, so a forward path
+    #: is only expensive when an adder sits on BOTH ends of it. This is the set
+    #: implemented by `fwd_rtl/fwd_variants.sv:fwd_no_double_add`; the two must
+    #: agree or the depth number does not describe the IPC number.
+    SHALLOW_OPS = frozenset({
+        "and", "or", "xor", "andi", "ori", "xori",
+        "sll", "srl", "sra", "slli", "srli", "srai",
+        "sllw", "srlw", "sraw", "slliw", "srliw", "sraiw",
+        "lui",
+        # Register-free producers. lui/auipc/li derive their result from the
+        # immediate and the PC, both known at decode -- there is no ALU on the
+        # producer side of the path at all, so forwarding them adds only the
+        # consumer's own mux. Cheaper than the shift case, not more expensive.
+        "auipc", "li", "mv",
+    })
+
+    @classmethod
+    def _is_shallow(cls, insn: Instruction) -> bool:
+        name = insn.name
+        if name.startswith("c."):
+            name = name[2:]
+        return name in cls.SHALLOW_OPS
+
     def _allows_intra_bundle_raw(
         self,
         first: Instruction,
@@ -1940,7 +1966,15 @@ class Model:
     ) -> bool:
         if not self.intra_bundle_forwarding:
             return False
-        return first_kind == "ALU" and second_kind == "ALU" and first.writes_scoreboard
+        if not (first_kind == "ALU" and second_kind == "ALU" and first.writes_scoreboard):
+            return False
+        if self.forwarding_restrict_double_add and not (
+            self._is_shallow(first) or self._is_shallow(second)
+        ):
+            # adder -> adder: the only pairing that would put two carry chains
+            # in series. Left unforwarded, so the path stays at 1.10x depth.
+            return False
+        return True
 
     def _symmetric_slots_can_pair(self, first_kind: str, second_kind: str) -> bool:
         if first_kind == "CONTROL" and second_kind == "CONTROL":
@@ -2314,6 +2348,8 @@ def main() -> int:
     )
     parser.add_argument("--symmetric-slots", action="store_true", help="Experimental: relax slot-0-only scarce-FU pairing")
     parser.add_argument("--intra-bundle-forwarding", action="store_true")
+    parser.add_argument("--forwarding-restrict-double-add", action="store_true",
+                        help="forward only when at least one end has no carry chain")
     parser.add_argument("--pairing-window", type=int, default=2, help="Experimental dual-issue second-slot lookahead window")
     parser.add_argument(
         "--tiny-scheduler-window",
@@ -2532,6 +2568,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         "allow_branch_branch": args.allow_branch_branch,
         "symmetric_slots": args.symmetric_slots,
         "intra_bundle_forwarding": args.intra_bundle_forwarding,
+        "forwarding_restrict_double_add": args.forwarding_restrict_double_add,
         "pairing_window": args.pairing_window,
         "tiny_scheduler_window": args.tiny_scheduler_window,
         "tiny_scheduler_strict_memory_order": not args.relaxed_scheduler_memory_order,
@@ -2566,6 +2603,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
                 "allow_branch_branch": args.allow_branch_branch,
                 "symmetric_slots": args.symmetric_slots,
                 "intra_bundle_forwarding": args.intra_bundle_forwarding,
+        "forwarding_restrict_double_add": args.forwarding_restrict_double_add,
             }
         )
     elif args.generic_dual_issue:
