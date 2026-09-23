@@ -23,3 +23,15 @@ holdout/sensitivity.json
 # Standalone scheduler synthesis/lint products.
 scheduler_rtl/build/
 scheduler_rtl/scheduler_sweep.json
+
+# Local explorations and regenerated study outputs.  Named result snapshots
+# are intentionally versioned; only tmp_-prefixed outputs are scratch data.
+tmp_*.py
+results/tmp_*.json
+holdout/tmp_*.py
+holdout/runs_*_tmp/
+
+# Linux/Android trace harness products.  The scripts and documentation under
+# linux-traces/ are versioned; downloaded source trees, binaries and logs are
+# reproducible and can be hundreds of megabytes.
+linux-traces/tmp_*

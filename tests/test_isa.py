@@ -41,6 +41,18 @@ def test_decode_load_store_and_muldiv():
     assert div.is_div
 
 
+def test_vector_opcodes_are_detected_including_vector_memory():
+    arithmetic = decode(0x00000057, pc=0x1100)
+    load = decode(0x02010087, pc=0x1104)   # unit-stride vector load, width=000
+    store = decode(0x020100A7, pc=0x1108)  # unit-stride vector store, width=000
+    scalar_fld = decode(0x00013087, pc=0x110C)
+
+    assert arithmetic.is_vector and arithmetic.is_trap
+    assert load.is_vector and load.is_load
+    assert store.is_vector and store.is_store
+    assert not scalar_fld.is_vector and scalar_fld.is_load
+
+
 def test_decode_floating_point_timing_classes():
     fmadd = decode(0x72F6F743, pc=0x1000)  # fmadd.d fa4, fa3, fa5, fa4
     assert fmadd.name == "fmadd"

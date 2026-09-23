@@ -65,6 +65,7 @@ class Instruction:
     is_csr: bool = False
     is_wfi: bool = False
     is_trap: bool = False
+    is_vector: bool = False
     is_mul: bool = False
     is_div: bool = False
     is_float: bool = False
@@ -124,6 +125,19 @@ def _decode_32(enc: int, pc: int) -> Instruction:
     rs1 = bits(enc, 19, 15)
     rs2 = bits(enc, 24, 20)
     funct7 = bits(enc, 31, 25)
+
+    # RVV arithmetic/configuration has its own major opcode.  Vector memory
+    # operations reuse LOAD-FP/STORE-FP, but their width field is disjoint from
+    # the scalar F/D widths.  Detect both before the scalar FP cases below.
+    # Timing an RVV instruction as scalar ALU/FP memory is worse than refusing
+    # it: LMUL, SEW, VL, VLEN, chaining, and the target vector-unit latencies
+    # are all required to assign meaningful timing.
+    if opcode == 0x57:
+        return _unsupported_vector(enc, pc, "unsupported_vector")
+    if opcode == 0x07 and funct3 in (0, 5, 6, 7):
+        return _unsupported_vector(enc, pc, "unsupported_vector_load", load=True)
+    if opcode == 0x27 and funct3 in (0, 5, 6, 7):
+        return _unsupported_vector(enc, pc, "unsupported_vector_store", store=True)
 
     if opcode == 0x37:
         return _with_rd(_base(enc, pc, "lui"), rd)
@@ -259,6 +273,22 @@ def _decode_32(enc: int, pc: int) -> Instruction:
     inst = _base(enc, pc, f"unknown_{opcode:02x}")
     inst.is_trap = True
     inst.fu = "TRAP"
+    return inst
+
+
+def _unsupported_vector(
+    enc: int,
+    pc: int,
+    name: str,
+    *,
+    load: bool = False,
+    store: bool = False,
+) -> Instruction:
+    inst = _base(enc, pc, name, "TRAP")
+    inst.is_trap = True
+    inst.is_vector = True
+    inst.is_load = load
+    inst.is_store = store
     return inst
 
 

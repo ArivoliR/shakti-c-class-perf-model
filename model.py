@@ -800,6 +800,12 @@ class Model:
         return cls(**kwargs)
 
     def run(self, entries: list[TraceEntry]) -> list[int]:
+        vector = next((entry for entry in entries if entry.insn.is_vector), None)
+        if vector is not None:
+            raise ValueError(
+                "refusing RVV trace: no vector timing model "
+                f"(first instruction 0x{vector.encoding:08x} at pc 0x{vector.pc:x})"
+            )
         self._reset_runtime()
         self.trace_len = len(entries)
         max_cycles = max(1000, len(entries) * 80 + 1000)
