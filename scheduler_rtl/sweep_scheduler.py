@@ -53,7 +53,12 @@ def main() -> int:
         cells = row.get("cells", "n/a")
         delay = row.get("abc_delay", "n/a")
         print(f"window={row['window']} lint={status} cells={cells} abc_delay={delay}")
-    return 0 if all(row["verilator_lint"]["status"] == "ok" for row in results) else 1
+    all_ok = all(
+        row["verilator_lint"]["status"] == "ok"
+        and (not isinstance(row["yosys"], dict) or row["yosys"]["status"] == "ok")
+        for row in results
+    )
+    return 0 if all_ok else 1
 
 
 def _write_top(*, window: int, width: int) -> Path:
@@ -153,14 +158,20 @@ def _run_yosys(top: Path, *, liberty: str | None) -> dict[str, Any]:
         script.extend([f"abc -liberty {liberty}", f"stat -liberty {liberty}"])
     else:
         script.append("stat")
-    command = ["yosys", "-q", "-p", "; ".join(script)]
+    command = ["yosys", "-p", "; ".join(script)]
     run = _run(command)
     row: dict[str, Any] = {"yosys": run}
     output = run["stdout"] + "\n" + run["stderr"]
     stat_file.write_text(output, encoding="utf-8")
     cell_match = re.search(r"Number of cells:\s+(\d+)", output)
+    if not cell_match:
+        # Yosys 0.66's table-style `stat` output uses "1970 cells" rather
+        # than the older "Number of cells: 1970" form. The final occurrence
+        # is the hierarchy-inclusive count.
+        matches = re.findall(r"^\s+(\d+)\s+cells$", output, flags=re.MULTILINE)
+        cell_match = matches[-1] if matches else None
     if cell_match:
-        row["cells"] = int(cell_match.group(1))
+        row["cells"] = int(cell_match.group(1) if hasattr(cell_match, "group") else cell_match)
     delay_match = re.search(r"Delay\s*=\s*([0-9.]+)", output)
     if delay_match:
         row["abc_delay"] = float(delay_match.group(1))
