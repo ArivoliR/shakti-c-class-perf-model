@@ -133,6 +133,12 @@ def test_alu_result_bypasses_from_downstream_head():
     assert cycles[2] - cycles[1] == 1
 
 
+def test_model_refuses_vector_trace_instead_of_silently_timing_it():
+    vector = entry(0, 0x1000, 0x00000057)
+    with pytest.raises(ValueError, match="refusing RVV trace"):
+        small_model().run([vector])
+
+
 def test_dual_issue_pairs_independent_alu_instructions():
     entries = annotate(
         [
@@ -221,6 +227,32 @@ def test_tiny_scheduler_can_issue_younger_ready_entries_past_blocked_alu_head():
     assert model._select_tiny_scheduler_indices(2) == [1, 2]
 
 
+def test_scheduler_shadow_entries_activate_only_while_dcache_bank_is_busy():
+    model = dual_model(
+        num_issue=4,
+        tiny_scheduler_window=8,
+        tiny_scheduler_fast_window=4,
+        model_dcache=True,
+        mem_banks=4,
+        lockstep_bundles=False,
+    )
+    packets = [
+        PipeEntry(entry(index, 0x1000 + 4 * index, 0x00128093), local_index=index)
+        for index in range(4)
+    ]
+    packets.append(PipeEntry(entry(4, 0x1010, 0x00600313), local_index=4))
+    model.scoreboard[("x", 5)] = 9
+    model.q_s2s3.begin_cycle()
+    for packet in packets:
+        model.q_s2s3.push(packet)
+
+    assert model._select_tiny_scheduler_indices(4) == []
+
+    model.dcache_bank_busy[0] = model.cycle + 9
+    assert model._select_tiny_scheduler_indices(4) == [4]
+    assert model.tiny_scheduler_shadow_cycles == 1
+
+
 def test_tiny_scheduler_does_not_skip_blocked_side_effect_head():
     model = dual_model(tiny_scheduler_window=4, lockstep_bundles=False, issue_width=2, stage4_width=2)
     packets = [
@@ -256,6 +288,73 @@ def test_tiny_scheduler_preserves_in_order_commit_after_non_head_issue():
 
     assert len(cycles) == len(entries)
     assert cycles == sorted(cycles)
+
+
+def test_tiny_scheduler_quad_width_can_issue_four_independent_alus():
+    entries = annotate(
+        [
+            entry(0, 0x1000, 0x00100093),  # addi x1, x0, 1
+            entry(1, 0x1004, 0x00200113),  # addi x2, x0, 2
+            entry(2, 0x1008, 0x00300193),  # addi x3, x0, 3
+            entry(3, 0x100C, 0x00400213),  # addi x4, x0, 4
+        ]
+    )
+    model = dual_model(
+        num_issue=4,
+        fetch_width=4,
+        fetch_decode_width=4,
+        stage4_width=4,
+        isb_s0s1=8,
+        isb_s1s2=8,
+        isb_s2s3=4,
+        isb_s3s4=16,
+        isb_s4s5=16,
+        tiny_scheduler_window=4,
+        lockstep_bundles=False,
+        atomic_pair_retire=False,
+        symmetric_slots=True,
+    )
+
+    cycles = model.run(entries)
+
+    assert cycles == [5, 5, 5, 5]
+    assert model.issue_width_histogram[4] == 1
+
+
+def test_scheduler_completion_buffer_does_not_head_block_ready_result():
+    model = dual_model(
+        tiny_scheduler_window=4,
+        lockstep_bundles=False,
+        stage4_width=2,
+    )
+    blocked = PipeEntry(entry(0, 0x1000, 0x00003083), local_index=0)  # ld x1, 0(x0)
+    ready = PipeEntry(entry(1, 0x1004, 0x00200113), local_index=1)  # addi x2, x0, 2
+    blocked.result_ready_cycle = 20
+    ready.result_ready_cycle = 5
+    model.cycle = 5
+    model.q_s3s4.push(blocked)
+    model.q_s3s4.push(ready)
+
+    assert model.try_stage4()
+    assert model.q_s4s5.first().trace.index == 1
+    assert model.q_s3s4.first().trace.index == 0
+
+
+def test_scheduler_bypass_sees_non_head_result_lane():
+    model = dual_model(tiny_scheduler_window=4, lockstep_bundles=False)
+    head = PipeEntry(entry(0, 0x1000, 0x00100093), local_index=0)
+    producer = PipeEntry(entry(1, 0x1004, 0x00200113), local_index=1)
+    head.bypassable = False
+    producer.bypassable = True
+    producer.bypass_ready_cycle = 7
+    producer.scoreboard_id = 5
+    model.cycle = 7
+    model.scoreboard[("x", 2)] = 5
+    model.q_s3s4.push(head)
+    model.q_s3s4.push(producer)
+
+    consumer = entry(2, 0x1008, 0x00110193).insn  # addi x3, x2, 1
+    assert model._operands_available(consumer)
 
 
 def test_shakti_dual_issue_memory_pairs_are_disabled_without_dual_mem():

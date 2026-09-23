@@ -569,8 +569,11 @@ class Model:
         symmetric_slots: bool = False,
         intra_bundle_forwarding: bool = False,
         forwarding_restrict_double_add: bool = False,
+        forward_to_memory: bool = False,
+        forward_to_control: bool = False,
         pairing_window: int = 2,
         tiny_scheduler_window: int = 0,
+        tiny_scheduler_fast_window: int = 0,
         tiny_scheduler_strict_memory_order: bool = True,
         tiny_scheduler_respect_side_effect_order: bool = True,
         branch_next_pc_stall: bool = True,
@@ -682,8 +685,13 @@ class Model:
         self.symmetric_slots = symmetric_slots
         self.intra_bundle_forwarding = intra_bundle_forwarding
         self.forwarding_restrict_double_add = forwarding_restrict_double_add
+        self.forward_to_memory = forward_to_memory
+        self.forward_to_control = forward_to_control
         self.pairing_window = max(2, int(pairing_window))
         self.tiny_scheduler_window = max(0, int(tiny_scheduler_window))
+        self.tiny_scheduler_fast_window = max(
+            0, min(int(tiny_scheduler_fast_window), self.tiny_scheduler_window)
+        )
         self.tiny_scheduler_strict_memory_order = tiny_scheduler_strict_memory_order
         self.tiny_scheduler_respect_side_effect_order = tiny_scheduler_respect_side_effect_order
         self.branch_next_pc_stall = branch_next_pc_stall
@@ -749,6 +757,8 @@ class Model:
         self.tiny_scheduler_issue_cycles = 0
         self.tiny_scheduler_non_head_issues = 0
         self.tiny_scheduler_order_blocks = 0
+        self.tiny_scheduler_shadow_cycles = 0
+        self.issue_width_histogram: Counter[int] = Counter()
         self.branch_next_pc_stall_cycles = 0
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
@@ -928,6 +938,8 @@ class Model:
             "tiny_scheduler_issue_cycles": self.tiny_scheduler_issue_cycles,
             "tiny_scheduler_non_head_issues": self.tiny_scheduler_non_head_issues,
             "tiny_scheduler_order_blocks": self.tiny_scheduler_order_blocks,
+            "tiny_scheduler_shadow_cycles": self.tiny_scheduler_shadow_cycles,
+            "issue_width_histogram": dict(self.issue_width_histogram),
             "branch_next_pc_stall_cycles": self.branch_next_pc_stall_cycles,
             "pair_bundles": self.dual_pair_bundles,
             "single_bundles": self.dual_single_bundles,
@@ -1001,6 +1013,8 @@ class Model:
         self.tiny_scheduler_issue_cycles = 0
         self.tiny_scheduler_non_head_issues = 0
         self.tiny_scheduler_order_blocks = 0
+        self.tiny_scheduler_shadow_cycles = 0
+        self.issue_width_histogram.clear()
         self.branch_next_pc_stall_cycles = 0
         self.memory_issues_this_cycle = 0
         self.control_issues_this_cycle = 0
@@ -1261,6 +1275,7 @@ class Model:
         if ordered_indices and ordered_indices[0] != 0:
             self.tiny_scheduler_non_head_issues += len(issued_entries)
         self.tiny_scheduler_issue_cycles += 1
+        self.issue_width_histogram[len(issued_entries)] += 1
 
         for entry in issued_entries:
             insn = entry.insn
@@ -1299,7 +1314,13 @@ class Model:
         if max_select <= 0:
             return []
         window_queue = self.q_s2s3 if queue is None else queue
-        window_len = min(len(window_queue), self.tiny_scheduler_window)
+        active_window = self.tiny_scheduler_window
+        if self.tiny_scheduler_fast_window > 0:
+            if self._dcache_bank_occupied():
+                self.tiny_scheduler_shadow_cycles += 1
+            else:
+                active_window = self.tiny_scheduler_fast_window
+        window_len = min(len(window_queue), active_window)
         selected: list[int] = []
         memory_count = 0
         control_count = 0
@@ -1335,6 +1356,15 @@ class Model:
             if insn.is_float or insn.fu == "FLOAT":
                 float_count += 1
         return sorted(selected)
+
+    def _dcache_bank_occupied(self) -> bool:
+        """Whether a modeled cache bank is still servicing an earlier access.
+
+        The miss-triggered shadow scheduler uses this as a hardware-plausible
+        activation signal.  It does not inspect future trace data: a real
+        bank-busy/MSHR-valid bit carries the same information.
+        """
+        return self.model_dcache and any(self.cycle < busy for busy in self.dcache_bank_busy)
 
     def _tiny_scheduler_can_select(
         self,
@@ -1630,13 +1660,28 @@ class Model:
     def _try_stage4_shakti_decoupled(self) -> bool:
         if self.q_s3s4.empty() or self.q_s4s5.full():
             return False
-        entry = self.q_s3s4.first()
+        ready_index = 0
+        if self.tiny_scheduler_window > 0:
+            # A scheduler that lets a younger instruction issue around a
+            # blocked head also needs a completion buffer.  Keeping stage4 as
+            # a FIFO makes a long-latency load/divide block every younger ALU
+            # result, which is still lockstep under a different name and was
+            # the reason the original quad experiment failed to drain.
+            ready_index = -1
+            for index in range(len(self.q_s3s4)):
+                candidate = self.q_s3s4.peek(index)
+                if candidate.stale_frontend or candidate.result_ready_cycle <= self.cycle:
+                    ready_index = index
+                    break
+            if ready_index < 0:
+                return False
+        entry = self.q_s3s4.peek(ready_index)
         if entry.stale_frontend:
-            self.q_s3s4.pop()
+            self.q_s3s4.pop_at(ready_index)
             return True
         if entry.result_ready_cycle > self.cycle:
             return False
-        entry = self.q_s3s4.pop()
+        entry = self.q_s3s4.pop_at(ready_index)
         self._prepare_stage5_entry(entry)
         self.q_s4s5.push(entry)
         return True
@@ -1972,10 +2017,25 @@ class Model:
     ) -> bool:
         if not self.intra_bundle_forwarding:
             return False
-        if not (first_kind == "ALU" and second_kind == "ALU" and first.writes_scoreboard):
+        if first_kind != "ALU" or not first.writes_scoreboard:
+            return False
+        # Which consumers accept a forwarded operand. ALU is the base case; the
+        # address adder in MEMORY and the comparator in CONTROL are the same
+        # kind of target, and together they are 19% of all pair rejections.
+        if second_kind == "ALU":
+            consumer_shallow = self._is_shallow(second)
+        elif second_kind == "MEMORY":
+            if not self.forward_to_memory:
+                return False
+            consumer_shallow = False    # address generation is an adder
+        elif second_kind == "CONTROL":
+            if not self.forward_to_control:
+                return False
+            consumer_shallow = False    # branch compare is a subtractor
+        else:
             return False
         if self.forwarding_restrict_double_add and not (
-            self._is_shallow(first) or self._is_shallow(second)
+            self._is_shallow(first) or consumer_shallow
         ):
             # adder -> adder: the only pairing that would put two carry chains
             # in series. Left unforwarded, so the path stays at 1.10x depth.
@@ -2188,6 +2248,12 @@ class Model:
     def _bypass_entries(self, queue: FixedQueue) -> list[PipeEntry]:
         if self.dual_policy != "shakti":
             return [queue.first()]
+        if self.tiny_scheduler_window > 0:
+            # The issue/completion experiment has independent scalar entries,
+            # not bundle metadata.  A real N-wide result bus exposes up to N
+            # lanes; exposing only queue.first() silently turns the proposed
+            # four-wide bypass fabric back into a scalar one.
+            return [queue.peek(index) for index in range(min(self.num_issue, len(queue)))]
         bundle = self._head_bundle(queue)
         if len(bundle) == 2:
             # RTL bypass priority within a source is slot1 before slot0. The
@@ -2354,6 +2420,10 @@ def main() -> int:
     )
     parser.add_argument("--symmetric-slots", action="store_true", help="Experimental: relax slot-0-only scarce-FU pairing")
     parser.add_argument("--intra-bundle-forwarding", action="store_true")
+    parser.add_argument("--forward-to-memory", action="store_true",
+                        help="forward an ALU result into the address adder")
+    parser.add_argument("--forward-to-control", action="store_true",
+                        help="forward an ALU result into the branch comparator")
     parser.add_argument("--forwarding-restrict-double-add", action="store_true",
                         help="forward only when at least one end has no carry chain")
     parser.add_argument("--pairing-window", type=int, default=2, help="Experimental dual-issue second-slot lookahead window")
@@ -2575,6 +2645,8 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
         "symmetric_slots": args.symmetric_slots,
         "intra_bundle_forwarding": args.intra_bundle_forwarding,
         "forwarding_restrict_double_add": args.forwarding_restrict_double_add,
+        "forward_to_memory": args.forward_to_memory,
+        "forward_to_control": args.forward_to_control,
         "pairing_window": args.pairing_window,
         "tiny_scheduler_window": args.tiny_scheduler_window,
         "tiny_scheduler_strict_memory_order": not args.relaxed_scheduler_memory_order,
@@ -2610,6 +2682,8 @@ def _model_overrides_from_args(args: argparse.Namespace) -> dict[str, int | bool
                 "symmetric_slots": args.symmetric_slots,
                 "intra_bundle_forwarding": args.intra_bundle_forwarding,
         "forwarding_restrict_double_add": args.forwarding_restrict_double_add,
+        "forward_to_memory": args.forward_to_memory,
+        "forward_to_control": args.forward_to_control,
             }
         )
     elif args.generic_dual_issue:

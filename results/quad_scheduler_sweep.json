@@ -1,0 +1,112 @@
+{
+  "results": [
+    {
+      "cells": 1970,
+      "top": "tiny_stage2_scheduler_w4.sv",
+      "verilator_lint": {
+        "command": [
+          "verilator",
+          "--lint-only",
+          "-Wall",
+          "-Wno-DECLFILENAME",
+          "-Wno-UNUSEDSIGNAL",
+          "-Wno-WIDTH",
+          "-Wno-UNOPTFLAT",
+          "/home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/tiny_stage2_scheduler.sv",
+          "/home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/build/tiny_stage2_scheduler_w4.sv",
+          "--top-module",
+          "tiny_stage2_scheduler_w4"
+        ],
+        "returncode": 0,
+        "status": "ok",
+        "stderr": "",
+        "stdout": "- V e r i l a t i o n   R e p o r t: Verilator 5.050 2026-07-01 rev v5.050\n- Verilator: Built from 0.059 MB sources in 3 modules, into 0.586 MB in 4 C++ files needing 0.000 MB\n- Verilator: Walltime 0.046 s (elab=0.001, cvt=0.037, bld=0.000); cpu 0.045 s on 1 threads; allocated 29.180 MB\n"
+      },
+      "width": 4,
+      "window": 4,
+      "yosys": {
+        "command": [
+          "yosys",
+          "-p",
+          "read_verilog -sv /home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/tiny_stage2_scheduler.sv /home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/build/tiny_stage2_scheduler_w4.sv; hierarchy -check -top tiny_stage2_scheduler_w4; proc; opt; techmap; opt; stat"
+        ],
+        "returncode": 0,
+        "status": "ok",
+        "stderr": "",
+        "stdout": "2348 unused wires.\n<suppressed ~1 debug messages>\n\n7.8. Executing OPT_EXPR pass (perform const folding).\nOptimizing module tiny_stage2_scheduler_w4.\nOptimizing module $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler.\n\n7.9. Rerunning OPT passes. (Maybe there is more to do..)\n\n7.10. Executing OPT_MUXTREE pass (detect dead branches in mux trees).\nRunning muxtree optimizer on module \\tiny_stage2_scheduler_w4..\n  Creating internal representation of mux trees.\n  No muxes found in this module.\nRunning muxtree optimizer on module $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler..\n  Creating internal representation of mux trees.\n  No muxes found in this module.\nRemoved 0 multiplexer ports.\n\n7.11. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).\n  Optimizing cells in module \\tiny_stage2_scheduler_w4.\n  Optimizing cells in module $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler.\nPerformed a total of 0 changes.\n\n7.12. Executing OPT_MERGE pass (detect identical cells).\nFinding identical cells in module `\\tiny_stage2_scheduler_w4'.\nComputing hashes of 1 cells of `\\tiny_stage2_scheduler_w4'.\nFinding duplicate cells in `\\tiny_stage2_scheduler_w4'.\nFinding identical cells in module `$paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler'.\nComputing hashes of 1970 cells of `$paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler'.\nFinding duplicate cells in `$paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler'.\nRemoved a total of 0 cells.\n\n7.13. Executing OPT_DFF pass (perform DFF optimizations).\n\n7.14. Executing OPT_CLEAN pass (remove unused cells and wires).\nFinding unused cells or wires in module \\tiny_stage2_scheduler_w4..\nFinding unused cells or wires in module $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler..\n\n7.15. Executing OPT_EXPR pass (perform const folding).\nOptimizing module tiny_stage2_scheduler_w4.\nOptimizing module $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler.\n\n7.16. Finished fast OPT passes. (There is nothing left to do.)\n\n8. Printing statistics.\n\n=== tiny_stage2_scheduler_w4 ===\n\n        +----------Local Count, excluding submodules.\n        | \n       22 wires\n      206 wire bits\n       22 public wires\n      206 public wire bits\n       22 ports\n      206 port bits\n        1 submodules\n        1   $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler\n\n=== $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler ===\n\n        +----------Local Count, excluding submodules.\n        | \n     1624 wires\n     4471 wire bits\n      326 public wires\n     1262 public wire bits\n       22 ports\n      206 port bits\n     1970 cells\n      387   $_AND_\n      469   $_MUX_\n      178   $_NOT_\n      520   $_OR_\n      416   $_XOR_\n\n=== design hierarchy ===\n\n        +----------Count including submodules.\n        | \n     1970 tiny_stage2_scheduler_w4\n     1970 $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler\n\n        +----------Count including submodules.\n        | \n     1646 wires\n     4677 wire bits\n      348 public wires\n     1468 public wire bits\n       44 ports\n      412 port bits\n        - memories\n        - memory bits\n        - processes\n     1970 cells\n      387   $_AND_\n      469   $_MUX_\n      178   $_NOT_\n      520   $_OR_\n      416   $_XOR_\n        1 submodules\n        1   $paramod$c50a6a8bc26aa4595dda459f78cbcd226c588d1a\\tiny_stage2_scheduler\n\nEnd of script. Logfile hash: 4171c00ea5, time: 0.65s, user: 0.65s, system: 0.03s, MEM: 71.35 MB peak\nYosys 0.66 (git sha1 86f2ddebc-dirty, g++ 16.1.1 -march=x86-64 -mtune=generic -O2 -fno-plt -fexceptions -fstack-clash-protection -fcf-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -ffile-prefix-map=/build/yosys/src=/usr/src/debug/yosys -fPIC -O3) [startdir/yosys at makepkg]\nTime spent: 30% 1x hierarchy (0 sec), 16% 12x opt_expr (0 sec), ...\n"
+      }
+    },
+    {
+      "cells": 7128,
+      "top": "tiny_stage2_scheduler_w8.sv",
+      "verilator_lint": {
+        "command": [
+          "verilator",
+          "--lint-only",
+          "-Wall",
+          "-Wno-DECLFILENAME",
+          "-Wno-UNUSEDSIGNAL",
+          "-Wno-WIDTH",
+          "-Wno-UNOPTFLAT",
+          "/home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/tiny_stage2_scheduler.sv",
+          "/home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/build/tiny_stage2_scheduler_w8.sv",
+          "--top-module",
+          "tiny_stage2_scheduler_w8"
+        ],
+        "returncode": 0,
+        "status": "ok",
+        "stderr": "",
+        "stdout": "- V e r i l a t i o n   R e p o r t: Verilator 5.050 2026-07-01 rev v5.050\n- Verilator: Built from 0.059 MB sources in 3 modules, into 2.429 MB in 6 C++ files needing 0.000 MB\n- Verilator: Walltime 0.272 s (elab=0.001, cvt=0.247, bld=0.000); cpu 0.270 s on 1 threads; allocated 60.152 MB\n"
+      },
+      "width": 4,
+      "window": 8,
+      "yosys": {
+        "command": [
+          "yosys",
+          "-p",
+          "read_verilog -sv /home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/tiny_stage2_scheduler.sv /home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/build/tiny_stage2_scheduler_w8.sv; hierarchy -check -top tiny_stage2_scheduler_w8; proc; opt; techmap; opt; stat"
+        ],
+        "returncode": 0,
+        "status": "ok",
+        "stderr": "",
+        "stdout": "036 unused wires.\n<suppressed ~1 debug messages>\n\n7.8. Executing OPT_EXPR pass (perform const folding).\nOptimizing module tiny_stage2_scheduler_w8.\nOptimizing module $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler.\n\n7.9. Rerunning OPT passes. (Maybe there is more to do..)\n\n7.10. Executing OPT_MUXTREE pass (detect dead branches in mux trees).\nRunning muxtree optimizer on module \\tiny_stage2_scheduler_w8..\n  Creating internal representation of mux trees.\n  No muxes found in this module.\nRunning muxtree optimizer on module $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler..\n  Creating internal representation of mux trees.\n  No muxes found in this module.\nRemoved 0 multiplexer ports.\n\n7.11. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).\n  Optimizing cells in module \\tiny_stage2_scheduler_w8.\n  Optimizing cells in module $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler.\nPerformed a total of 0 changes.\n\n7.12. Executing OPT_MERGE pass (detect identical cells).\nFinding identical cells in module `\\tiny_stage2_scheduler_w8'.\nComputing hashes of 1 cells of `\\tiny_stage2_scheduler_w8'.\nFinding duplicate cells in `\\tiny_stage2_scheduler_w8'.\nFinding identical cells in module `$paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler'.\nComputing hashes of 7128 cells of `$paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler'.\nFinding duplicate cells in `$paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler'.\nRemoved a total of 0 cells.\n\n7.13. Executing OPT_DFF pass (perform DFF optimizations).\n\n7.14. Executing OPT_CLEAN pass (remove unused cells and wires).\nFinding unused cells or wires in module \\tiny_stage2_scheduler_w8..\nFinding unused cells or wires in module $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler..\n\n7.15. Executing OPT_EXPR pass (perform const folding).\nOptimizing module tiny_stage2_scheduler_w8.\nOptimizing module $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler.\n\n7.16. Finished fast OPT passes. (There is nothing left to do.)\n\n8. Printing statistics.\n\n=== tiny_stage2_scheduler_w8 ===\n\n        +----------Local Count, excluding submodules.\n        | \n       22 wires\n      366 wire bits\n       22 public wires\n      366 public wire bits\n       22 ports\n      366 port bits\n        1 submodules\n        1   $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler\n\n=== $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler ===\n\n        +----------Local Count, excluding submodules.\n        | \n     4837 wires\n    11982 wire bits\n      630 public wires\n     2606 public wire bits\n       22 ports\n      366 port bits\n     7128 cells\n     1411   $_AND_\n     1739   $_MUX_\n      480   $_NOT_\n     1742   $_OR_\n     1756   $_XOR_\n\n=== design hierarchy ===\n\n        +----------Count including submodules.\n        | \n     7128 tiny_stage2_scheduler_w8\n     7128 $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler\n\n        +----------Count including submodules.\n        | \n     4859 wires\n    12348 wire bits\n      652 public wires\n     2972 public wire bits\n       44 ports\n      732 port bits\n        - memories\n        - memory bits\n        - processes\n     7128 cells\n     1411   $_AND_\n     1739   $_MUX_\n      480   $_NOT_\n     1742   $_OR_\n     1756   $_XOR_\n        1 submodules\n        1   $paramod$4eaf9684000a6a734215525bd612577d1c499745\\tiny_stage2_scheduler\n\nEnd of script. Logfile hash: 193a62a092, time: 3.21s, user: 3.37s, system: 0.08s, MEM: 186.03 MB peak\nYosys 0.66 (git sha1 86f2ddebc-dirty, g++ 16.1.1 -march=x86-64 -mtune=generic -O2 -fno-plt -fexceptions -fstack-clash-protection -fcf-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -ffile-prefix-map=/build/yosys/src=/usr/src/debug/yosys -fPIC -O3) [startdir/yosys at makepkg]\nTime spent: 32% 1x hierarchy (1 sec), 20% 16x opt_expr (0 sec), ...\n"
+      }
+    },
+    {
+      "cells": 14937,
+      "top": "tiny_stage2_scheduler_w12.sv",
+      "verilator_lint": {
+        "command": [
+          "verilator",
+          "--lint-only",
+          "-Wall",
+          "-Wno-DECLFILENAME",
+          "-Wno-UNUSEDSIGNAL",
+          "-Wno-WIDTH",
+          "-Wno-UNOPTFLAT",
+          "/home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/tiny_stage2_scheduler.sv",
+          "/home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/build/tiny_stage2_scheduler_w12.sv",
+          "--top-module",
+          "tiny_stage2_scheduler_w12"
+        ],
+        "returncode": 0,
+        "status": "ok",
+        "stderr": "",
+        "stdout": "- V e r i l a t i o n   R e p o r t: Verilator 5.050 2026-07-01 rev v5.050\n- Verilator: Built from 0.059 MB sources in 3 modules, into 1.900 MB in 4 C++ files needing 0.000 MB\n- Verilator: Walltime 0.177 s (elab=0.001, cvt=0.158, bld=0.000); cpu 0.175 s on 1 threads; allocated 47.750 MB\n"
+      },
+      "width": 4,
+      "window": 12,
+      "yosys": {
+        "command": [
+          "yosys",
+          "-p",
+          "read_verilog -sv /home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/tiny_stage2_scheduler.sv /home/blazevfx/Documents/projects/shakti/c-class/perf-model/scheduler_rtl/build/tiny_stage2_scheduler_w12.sv; hierarchy -check -top tiny_stage2_scheduler_w12; proc; opt; techmap; opt; stat"
+        ],
+        "returncode": 0,
+        "status": "ok",
+        "stderr": "",
+        "stdout": "ires.\n<suppressed ~76 debug messages>\n\n7.8. Executing OPT_EXPR pass (perform const folding).\nOptimizing module tiny_stage2_scheduler_w12.\nOptimizing module $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler.\n\n7.9. Rerunning OPT passes. (Maybe there is more to do..)\n\n7.10. Executing OPT_MUXTREE pass (detect dead branches in mux trees).\nRunning muxtree optimizer on module \\tiny_stage2_scheduler_w12..\n  Creating internal representation of mux trees.\n  No muxes found in this module.\nRunning muxtree optimizer on module $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler..\n  Creating internal representation of mux trees.\n  No muxes found in this module.\nRemoved 0 multiplexer ports.\n\n7.11. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).\n  Optimizing cells in module \\tiny_stage2_scheduler_w12.\n  Optimizing cells in module $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler.\nPerformed a total of 0 changes.\n\n7.12. Executing OPT_MERGE pass (detect identical cells).\nFinding identical cells in module `\\tiny_stage2_scheduler_w12'.\nComputing hashes of 1 cells of `\\tiny_stage2_scheduler_w12'.\nFinding duplicate cells in `\\tiny_stage2_scheduler_w12'.\nFinding identical cells in module `$paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler'.\nComputing hashes of 14937 cells of `$paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler'.\nFinding duplicate cells in `$paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler'.\nRemoved a total of 0 cells.\n\n7.13. Executing OPT_DFF pass (perform DFF optimizations).\n\n7.14. Executing OPT_CLEAN pass (remove unused cells and wires).\nFinding unused cells or wires in module \\tiny_stage2_scheduler_w12..\nFinding unused cells or wires in module $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler..\n\n7.15. Executing OPT_EXPR pass (perform const folding).\nOptimizing module tiny_stage2_scheduler_w12.\nOptimizing module $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler.\n\n7.16. Finished fast OPT passes. (There is nothing left to do.)\n\n8. Printing statistics.\n\n=== tiny_stage2_scheduler_w12 ===\n\n        +----------Local Count, excluding submodules.\n        | \n       22 wires\n      526 wire bits\n       22 public wires\n      526 public wire bits\n       22 ports\n      526 port bits\n        1 submodules\n        1   $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler\n\n=== $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler ===\n\n        +----------Local Count, excluding submodules.\n        | \n     9458 wires\n    21877 wire bits\n      934 public wires\n     4078 public wire bits\n       22 ports\n      526 port bits\n    14937 cells\n     2849   $_AND_\n     3623   $_MUX_\n      894   $_NOT_\n     3652   $_OR_\n     3919   $_XOR_\n\n=== design hierarchy ===\n\n        +----------Count including submodules.\n        | \n    14937 tiny_stage2_scheduler_w12\n    14937 $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler\n\n        +----------Count including submodules.\n        | \n     9480 wires\n    22403 wire bits\n      956 public wires\n     4604 public wire bits\n       44 ports\n     1052 port bits\n        - memories\n        - memory bits\n        - processes\n    14937 cells\n     2849   $_AND_\n     3623   $_MUX_\n      894   $_NOT_\n     3652   $_OR_\n     3919   $_XOR_\n        1 submodules\n        1   $paramod$903f6f5f1111c746e88b5be8535788f6020d03ba\\tiny_stage2_scheduler\n\nEnd of script. Logfile hash: 79e0d8ace5, time: 9.17s, user: 9.76s, system: 0.17s, MEM: 369.98 MB peak\nYosys 0.66 (git sha1 86f2ddebc-dirty, g++ 16.1.1 -march=x86-64 -mtune=generic -O2 -fno-plt -fexceptions -fstack-clash-protection -fcf-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -ffile-prefix-map=/build/yosys/src=/usr/src/debug/yosys -fPIC -O3) [startdir/yosys at makepkg]\nTime spent: 33% 1x hierarchy (3 sec), 19% 20x opt_expr (1 sec), ...\n"
+      }
+    }
+  ]
+}

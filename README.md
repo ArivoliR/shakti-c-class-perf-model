@@ -275,6 +275,58 @@ the conservative lookahead policy is not yet cashing extra depth on Dhrystone:
 W=2 is slightly better than W=4. The matching timing artifact is in
 `scheduler_rtl/`.
 
+## Quad-Issue Architecture Study
+
+`quadstudy.py` is a trace-driven screening harness for a four-wide C-Class. It
+compares every proposed point with the dual model over the same disjoint trace
+windows, records issue-width utilization and selector work, and emits
+dependence-only ceilings. It does **not** validate quad RTL; no quad RTL exists
+yet, so its deltas are hypotheses to write down before each implementation
+step, then test with the held-out protocol.
+
+Run the default three-workload study:
+
+```sh
+../.venv/bin/python3 quadstudy.py \
+  --output results/quad_issue_study.json
+```
+
+Run a focused design-point comparison, including the exploratory cache model:
+
+```sh
+../.venv/bin/python3 quadstudy.py --model-dcache \
+  --only dual_reference,quad_banked4_w4,quad_banked4_w8 \
+  --output results/quad_issue_dcache.json
+```
+
+The recommended first RTL point is `quad_banked4_merge_w4`: a four-entry,
+four-select age-bounded issue buffer; eight-entry independent completion;
+in-order four-wide retirement; four simple integer lanes; one control, MULDIV,
+and FPU lane; and two memory request lanes feeding four line-interleaved banks
+with a same-line coalescer. The coalescer result is an architectural target,
+not a claim that two same-line stores or store-to-load cases are already
+correct in RTL. Those cases require ordered byte-mask merging and forwarding.
+
+The saved studies under `results/quad_issue_*.json` deliberately retain
+negative results. On the sampled CoreMark windows, a four-entry window beats
+always-on windows of eight or twelve, and four memory lanes are effectively
+identical to two. On `fpbench`, a cache-enabled eight-entry result exposes a
+possible memory-level-parallelism opportunity, but the effect is unvalidated
+and is kept out of the first implementation point. The exact frozen Q4-C point,
+including its per-window scatter and eight-entry capacities, is saved as
+`results/quad_issue_q4c_frozen.json`.
+
+The standalone width-four selector passes Verilator lint and Yosys generic
+synthesis at W4/W8/W12. The hierarchy-inclusive generic counts are
+1,970/7,128/14,937 cells; these are complexity indicators, not mapped area or
+delay. Regenerate them with:
+
+```sh
+../.venv/bin/python3 scheduler_rtl/sweep_scheduler.py \
+  --width 4 --windows 4,8,12 \
+  --json-output results/quad_scheduler_sweep.json
+```
+
 Because the input trace is still the single-issue committed instruction stream,
 dual-issue outputs are predicted cycle counts and IPC, not cycle-accuracy
 validation results.

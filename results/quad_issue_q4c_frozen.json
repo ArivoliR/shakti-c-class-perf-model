@@ -1,0 +1,625 @@
+{
+  "benchmarks": {
+    "coremark40": {
+      "ceilings": [
+        {
+          "candidate_checks_per_cycle": 1.9999962735789294,
+          "cycles": 536708,
+          "instructions": 900000,
+          "ipc": 1.676889481803886,
+          "issue_width": 2,
+          "lookahead_window": 2
+        },
+        {
+          "candidate_checks_per_cycle": 3.0270174633231957,
+          "cycles": 418248,
+          "instructions": 900000,
+          "ipc": 2.151833362024445,
+          "issue_width": 4,
+          "lookahead_window": 4
+        },
+        {
+          "candidate_checks_per_cycle": 5.347707518849483,
+          "cycles": 229184,
+          "instructions": 900000,
+          "ipc": 3.9269757051103045,
+          "issue_width": 4,
+          "lookahead_window": 8
+        },
+        {
+          "candidate_checks_per_cycle": 5.352702864783464,
+          "cycles": 225113,
+          "instructions": 900000,
+          "ipc": 3.9979921195133112,
+          "issue_width": 4,
+          "lookahead_window": 12
+        }
+      ],
+      "design_points": [
+        {
+          "average_issue_width_when_active": null,
+          "candidate_checks": 0,
+          "candidate_checks_per_model_cycle": 0.0,
+          "cycle_account": {
+            "decode_blocked": 17804,
+            "execute_blocked": 163414,
+            "flush_redirect": 6852,
+            "frontend_starved": 758,
+            "retired_full": 339513,
+            "retired_partial": 220974
+          },
+          "cycle_delta_vs_dual": 0,
+          "cycle_reduction_vs_dual": 0.0,
+          "full_width_issue_share": null,
+          "hypothesis": "Measured dual topology represented by the model.",
+          "instructions": 900000,
+          "ipc_gain_vs_dual": 0.0,
+          "issue_width_histogram": {},
+          "label": "dual RTL policy",
+          "model_cycles": 749298,
+          "model_ipc": 1.2011242523001529,
+          "name": "dual_reference",
+          "non_head_issues": 0,
+          "order_blocks": 0,
+          "overrides": {
+            "atomic_pair_retire": true,
+            "commit_width": 1,
+            "control_issue_width": 1,
+            "decode_width": 1,
+            "div_latency": 32,
+            "dual_policy": "shakti",
+            "fetch_decode_width": 2,
+            "fetch_residue_bytes": 6,
+            "fetch_width": 2,
+            "fetch_word_bytes": 8,
+            "isb_s0s1": 4,
+            "isb_s1s2": 6,
+            "isb_s2s3": 2,
+            "isb_s3s4": 16,
+            "isb_s4s5": 16,
+            "issue_width": 1,
+            "lockstep_bundles": true,
+            "mem_banks": 1,
+            "memory_issue_width": 1,
+            "memory_pairing": "none",
+            "model_dcache": false,
+            "model_fetch_word_alignment": true,
+            "mul_latency": 2,
+            "num_issue": 2,
+            "stage4_width": 1
+          },
+          "per_window_cycle_reduction_vs_dual": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "runtime_seconds": 11.961228726999252,
+          "shadow_window_cycles": 0,
+          "speedup_vs_dual": 1.0,
+          "status": "model_of_measured_dual_topology",
+          "window_scatter": {
+            "maximum": 0.0,
+            "mean": 0.0,
+            "minimum": 0.0,
+            "population_sigma": 0.0,
+            "resolution_floor_2sigma": 0.0,
+            "warning": "trace-window scatter only; not a predicted-vs-measured RTL error bar"
+          },
+          "window_spans": [
+            250026,
+            248362,
+            250910
+          ]
+        },
+        {
+          "average_issue_width_when_active": 1.7927286924235302,
+          "candidate_checks": 3866756,
+          "candidate_checks_per_model_cycle": 5.647834495007625,
+          "cycle_account": {
+            "backpressure": 31,
+            "decode_blocked": 15444,
+            "execute_blocked": 162575,
+            "flush_redirect": 5064,
+            "frontend_starved": 2598,
+            "retired_full": 28855,
+            "retired_partial": 470093
+          },
+          "cycle_delta_vs_dual": -64654,
+          "cycle_reduction_vs_dual": 0.08628609712023788,
+          "full_width_issue_share": 0.04198769789732844,
+          "hypothesis": "Proposed point: coalesce two same-line requests after bank selection to recover same-line conflicts.",
+          "instructions": 900000,
+          "ipc_gain_vs_dual": 0.09443447981724809,
+          "issue_width_histogram": {
+            "1": 201583,
+            "2": 223997,
+            "3": 55369,
+            "4": 21079
+          },
+          "label": "quad, 4 banks + line merge",
+          "model_cycles": 684644,
+          "model_ipc": 1.314551796261999,
+          "name": "quad_banked4_merge_w4",
+          "non_head_issues": 5570,
+          "order_blocks": 732822,
+          "overrides": {
+            "allow_branch_branch": false,
+            "atomic_pair_retire": false,
+            "bank_merge_same_line": true,
+            "bank_shift": 6,
+            "commit_width": 1,
+            "control_issue_width": 1,
+            "decode_width": 1,
+            "div_latency": 32,
+            "dual_policy": "shakti",
+            "fetch_decode_width": 4,
+            "fetch_residue_bytes": 14,
+            "fetch_width": 4,
+            "fetch_word_bytes": 16,
+            "isb_s0s1": 8,
+            "isb_s1s2": 8,
+            "isb_s2s3": 4,
+            "isb_s3s4": 8,
+            "isb_s4s5": 8,
+            "issue_width": 1,
+            "lockstep_bundles": false,
+            "mem_banks": 4,
+            "memory_issue_width": 2,
+            "memory_pairing": "banked",
+            "model_dcache": false,
+            "model_fetch_word_alignment": true,
+            "mul_latency": 2,
+            "num_issue": 4,
+            "stage4_width": 4,
+            "symmetric_slots": true,
+            "tiny_scheduler_respect_side_effect_order": true,
+            "tiny_scheduler_strict_memory_order": true,
+            "tiny_scheduler_window": 4
+          },
+          "per_window_cycle_reduction_vs_dual": [
+            0.08693095918024525,
+            0.08591491451993462,
+            0.08601092025028895
+          ],
+          "runtime_seconds": 18.32273053300014,
+          "shadow_window_cycles": 0,
+          "speedup_vs_dual": 1.094434479817248,
+          "status": "predicted_not_rtl_validated",
+          "window_scatter": {
+            "maximum": 0.08693095918024525,
+            "mean": 0.0862855979834896,
+            "minimum": 0.08591491451993462,
+            "population_sigma": 0.0004580193451326604,
+            "resolution_floor_2sigma": 0.0009160386902653208,
+            "warning": "trace-window scatter only; not a predicted-vs-measured RTL error bar"
+          },
+          "window_spans": [
+            228291,
+            227024,
+            229329
+          ]
+        }
+      ],
+      "instructions": 900000,
+      "trace": "/home/blazevfx/Documents/projects/shakti/c-class-dual-issue/benchmarks/output/coremark40/rtl.dump",
+      "window_lengths": [
+        300000,
+        300000,
+        300000
+      ]
+    },
+    "dhry500": {
+      "ceilings": [
+        {
+          "candidate_checks_per_cycle": 1.999993599918079,
+          "cycles": 156248,
+          "instructions": 267061,
+          "ipc": 1.7092122779171572,
+          "issue_width": 2,
+          "lookahead_window": 2
+        },
+        {
+          "candidate_checks_per_cycle": 2.999395430114206,
+          "cycles": 120747,
+          "instructions": 267061,
+          "ipc": 2.211740250275369,
+          "issue_width": 4,
+          "lookahead_window": 4
+        },
+        {
+          "candidate_checks_per_cycle": 6.116443871799001,
+          "cycles": 74508,
+          "instructions": 267061,
+          "ipc": 3.5843265152735277,
+          "issue_width": 4,
+          "lookahead_window": 8
+        },
+        {
+          "candidate_checks_per_cycle": 7.679016210477603,
+          "cycles": 73471,
+          "instructions": 267061,
+          "ipc": 3.634917178206367,
+          "issue_width": 4,
+          "lookahead_window": 12
+        }
+      ],
+      "design_points": [
+        {
+          "average_issue_width_when_active": null,
+          "candidate_checks": 0,
+          "candidate_checks_per_model_cycle": 0.0,
+          "cycle_account": {
+            "decode_blocked": 2693,
+            "execute_blocked": 77950,
+            "flush_redirect": 1019,
+            "frontend_starved": 73,
+            "retired_full": 92308,
+            "retired_partial": 82445
+          },
+          "cycle_delta_vs_dual": 0,
+          "cycle_reduction_vs_dual": 0.0,
+          "full_width_issue_share": null,
+          "hypothesis": "Measured dual topology represented by the model.",
+          "instructions": 267061,
+          "ipc_gain_vs_dual": 0.0,
+          "issue_width_histogram": {},
+          "label": "dual RTL policy",
+          "model_cycles": 256483,
+          "model_ipc": 1.041242499502891,
+          "name": "dual_reference",
+          "non_head_issues": 0,
+          "order_blocks": 0,
+          "overrides": {
+            "atomic_pair_retire": true,
+            "commit_width": 1,
+            "control_issue_width": 1,
+            "decode_width": 1,
+            "div_latency": 32,
+            "dual_policy": "shakti",
+            "fetch_decode_width": 2,
+            "fetch_residue_bytes": 6,
+            "fetch_width": 2,
+            "fetch_word_bytes": 8,
+            "isb_s0s1": 4,
+            "isb_s1s2": 6,
+            "isb_s2s3": 2,
+            "isb_s3s4": 16,
+            "isb_s4s5": 16,
+            "issue_width": 1,
+            "lockstep_bundles": true,
+            "mem_banks": 1,
+            "memory_issue_width": 1,
+            "memory_pairing": "none",
+            "model_dcache": false,
+            "model_fetch_word_alignment": true,
+            "mul_latency": 2,
+            "num_issue": 2,
+            "stage4_width": 1
+          },
+          "per_window_cycle_reduction_vs_dual": [
+            0.0
+          ],
+          "runtime_seconds": 3.9766149269999005,
+          "shadow_window_cycles": 0,
+          "speedup_vs_dual": 1.0,
+          "status": "model_of_measured_dual_topology",
+          "window_scatter": {
+            "maximum": 0.0,
+            "mean": 0.0,
+            "minimum": 0.0,
+            "population_sigma": null,
+            "resolution_floor_2sigma": null,
+            "warning": "trace-window scatter only; not a predicted-vs-measured RTL error bar"
+          },
+          "window_spans": [
+            256483
+          ]
+        },
+        {
+          "average_issue_width_when_active": 1.5218451719520187,
+          "candidate_checks": 1243075,
+          "candidate_checks_per_model_cycle": 5.530258878799877,
+          "cycle_account": {
+            "backpressure": 3,
+            "decode_blocked": 2367,
+            "execute_blocked": 45567,
+            "flush_redirect": 1114,
+            "frontend_starved": 235,
+            "retired_full": 4538,
+            "retired_partial": 170958
+          },
+          "cycle_delta_vs_dual": -31706,
+          "cycle_reduction_vs_dual": 0.12361832947992654,
+          "full_width_issue_share": 0.016291990768441747,
+          "hypothesis": "Proposed point: coalesce two same-line requests after bank selection to recover same-line conflicts.",
+          "instructions": 267061,
+          "ipc_gain_vs_dual": 0.14105535708724648,
+          "issue_width_histogram": {
+            "1": 110933,
+            "2": 40387,
+            "3": 21306,
+            "4": 2859
+          },
+          "label": "quad, 4 banks + line merge",
+          "model_cycles": 224777,
+          "model_ipc": 1.1881153320846884,
+          "name": "quad_banked4_merge_w4",
+          "non_head_issues": 5,
+          "order_blocks": 254272,
+          "overrides": {
+            "allow_branch_branch": false,
+            "atomic_pair_retire": false,
+            "bank_merge_same_line": true,
+            "bank_shift": 6,
+            "commit_width": 1,
+            "control_issue_width": 1,
+            "decode_width": 1,
+            "div_latency": 32,
+            "dual_policy": "shakti",
+            "fetch_decode_width": 4,
+            "fetch_residue_bytes": 14,
+            "fetch_width": 4,
+            "fetch_word_bytes": 16,
+            "isb_s0s1": 8,
+            "isb_s1s2": 8,
+            "isb_s2s3": 4,
+            "isb_s3s4": 8,
+            "isb_s4s5": 8,
+            "issue_width": 1,
+            "lockstep_bundles": false,
+            "mem_banks": 4,
+            "memory_issue_width": 2,
+            "memory_pairing": "banked",
+            "model_dcache": false,
+            "model_fetch_word_alignment": true,
+            "mul_latency": 2,
+            "num_issue": 4,
+            "stage4_width": 4,
+            "symmetric_slots": true,
+            "tiny_scheduler_respect_side_effect_order": true,
+            "tiny_scheduler_strict_memory_order": true,
+            "tiny_scheduler_window": 4
+          },
+          "per_window_cycle_reduction_vs_dual": [
+            0.12361832947992654
+          ],
+          "runtime_seconds": 5.7688304530020105,
+          "shadow_window_cycles": 0,
+          "speedup_vs_dual": 1.1410553570872464,
+          "status": "predicted_not_rtl_validated",
+          "window_scatter": {
+            "maximum": 0.12361832947992654,
+            "mean": 0.12361832947992654,
+            "minimum": 0.12361832947992654,
+            "population_sigma": null,
+            "resolution_floor_2sigma": null,
+            "warning": "trace-window scatter only; not a predicted-vs-measured RTL error bar"
+          },
+          "window_spans": [
+            224777
+          ]
+        }
+      ],
+      "instructions": 267061,
+      "trace": "/home/blazevfx/Documents/projects/shakti/c-class-dual-issue/benchmarks/output/dhry500/rtl.dump",
+      "window_lengths": [
+        267061
+      ]
+    },
+    "fpbench64": {
+      "ceilings": [
+        {
+          "candidate_checks_per_cycle": 1.9999977854009199,
+          "cycles": 451549,
+          "instructions": 900000,
+          "ipc": 1.993139172049988,
+          "issue_width": 2,
+          "lookahead_window": 2
+        },
+        {
+          "candidate_checks_per_cycle": 3.7524888901714086,
+          "cycles": 277232,
+          "instructions": 900000,
+          "ipc": 3.24637848444624,
+          "issue_width": 4,
+          "lookahead_window": 4
+        },
+        {
+          "candidate_checks_per_cycle": 6.647740405084849,
+          "cycles": 230174,
+          "instructions": 900000,
+          "ipc": 3.9100854136435914,
+          "issue_width": 4,
+          "lookahead_window": 8
+        },
+        {
+          "candidate_checks_per_cycle": 6.591329081575965,
+          "cycles": 225005,
+          "instructions": 900000,
+          "ipc": 3.999911113086376,
+          "issue_width": 4,
+          "lookahead_window": 12
+        }
+      ],
+      "design_points": [
+        {
+          "average_issue_width_when_active": null,
+          "candidate_checks": 0,
+          "candidate_checks_per_model_cycle": 0.0,
+          "cycle_account": {
+            "decode_blocked": 3150,
+            "execute_blocked": 1301853,
+            "flush_redirect": 33,
+            "frontend_starved": 19,
+            "retired_full": 350265,
+            "retired_partial": 199470
+          },
+          "cycle_delta_vs_dual": 0,
+          "cycle_reduction_vs_dual": 0.0,
+          "full_width_issue_share": null,
+          "hypothesis": "Measured dual topology represented by the model.",
+          "instructions": 900000,
+          "ipc_gain_vs_dual": 0.0,
+          "issue_width_histogram": {},
+          "label": "dual RTL policy",
+          "model_cycles": 1854771,
+          "model_ipc": 0.48523510449537977,
+          "name": "dual_reference",
+          "non_head_issues": 0,
+          "order_blocks": 0,
+          "overrides": {
+            "atomic_pair_retire": true,
+            "commit_width": 1,
+            "control_issue_width": 1,
+            "decode_width": 1,
+            "div_latency": 32,
+            "dual_policy": "shakti",
+            "fetch_decode_width": 2,
+            "fetch_residue_bytes": 6,
+            "fetch_width": 2,
+            "fetch_word_bytes": 8,
+            "isb_s0s1": 4,
+            "isb_s1s2": 6,
+            "isb_s2s3": 2,
+            "isb_s3s4": 16,
+            "isb_s4s5": 16,
+            "issue_width": 1,
+            "lockstep_bundles": true,
+            "mem_banks": 1,
+            "memory_issue_width": 1,
+            "memory_pairing": "none",
+            "model_dcache": false,
+            "model_fetch_word_alignment": true,
+            "mul_latency": 2,
+            "num_issue": 2,
+            "stage4_width": 1
+          },
+          "per_window_cycle_reduction_vs_dual": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "runtime_seconds": 18.74858074900112,
+          "shadow_window_cycles": 0,
+          "speedup_vs_dual": 1.0,
+          "status": "model_of_measured_dual_topology",
+          "window_scatter": {
+            "maximum": 0.0,
+            "mean": 0.0,
+            "minimum": 0.0,
+            "population_sigma": 0.0,
+            "resolution_floor_2sigma": 0.0,
+            "warning": "trace-window scatter only; not a predicted-vs-measured RTL error bar"
+          },
+          "window_spans": [
+            570124,
+            642317,
+            642330
+          ]
+        },
+        {
+          "average_issue_width_when_active": 1.2339145527882356,
+          "candidate_checks": 8990658,
+          "candidate_checks_per_model_cycle": 5.040770626400267,
+          "cycle_account": {
+            "decode_blocked": 197,
+            "execute_blocked": 1308506,
+            "flush_redirect": 77,
+            "frontend_starved": 19,
+            "retired_full": 70004,
+            "retired_partial": 404804
+          },
+          "cycle_delta_vs_dual": -71183,
+          "cycle_reduction_vs_dual": 0.0383783227147718,
+          "full_width_issue_share": 0.005780204171728001,
+          "hypothesis": "Proposed point: coalesce two same-line requests after bank selection to recover same-line conflicts.",
+          "instructions": 900000,
+          "ipc_gain_vs_dual": 0.03991000163714939,
+          "issue_width_histogram": {
+            "1": 580132,
+            "2": 132110,
+            "3": 12928,
+            "4": 4216
+          },
+          "label": "quad, 4 banks + line merge",
+          "model_cycles": 1783588,
+          "model_ipc": 0.5046008383101928,
+          "name": "quad_banked4_merge_w4",
+          "non_head_issues": 254640,
+          "order_blocks": 688777,
+          "overrides": {
+            "allow_branch_branch": false,
+            "atomic_pair_retire": false,
+            "bank_merge_same_line": true,
+            "bank_shift": 6,
+            "commit_width": 1,
+            "control_issue_width": 1,
+            "decode_width": 1,
+            "div_latency": 32,
+            "dual_policy": "shakti",
+            "fetch_decode_width": 4,
+            "fetch_residue_bytes": 14,
+            "fetch_width": 4,
+            "fetch_word_bytes": 16,
+            "isb_s0s1": 8,
+            "isb_s1s2": 8,
+            "isb_s2s3": 4,
+            "isb_s3s4": 8,
+            "isb_s4s5": 8,
+            "issue_width": 1,
+            "lockstep_bundles": false,
+            "mem_banks": 4,
+            "memory_issue_width": 2,
+            "memory_pairing": "banked",
+            "model_dcache": false,
+            "model_fetch_word_alignment": true,
+            "mul_latency": 2,
+            "num_issue": 4,
+            "stage4_width": 4,
+            "symmetric_slots": true,
+            "tiny_scheduler_respect_side_effect_order": true,
+            "tiny_scheduler_strict_memory_order": true,
+            "tiny_scheduler_window": 4
+          },
+          "per_window_cycle_reduction_vs_dual": [
+            0.04496565659400411,
+            0.035457570016051265,
+            0.03545218190026933
+          ],
+          "runtime_seconds": 32.91689905399835,
+          "shadow_window_cycles": 0,
+          "speedup_vs_dual": 1.0399100016371494,
+          "status": "predicted_not_rtl_validated",
+          "window_scatter": {
+            "maximum": 0.04496565659400411,
+            "mean": 0.03862513617010824,
+            "minimum": 0.03545218190026933,
+            "population_sigma": 0.004483425527601892,
+            "resolution_floor_2sigma": 0.008966851055203784,
+            "warning": "trace-window scatter only; not a predicted-vs-measured RTL error bar"
+          },
+          "window_spans": [
+            544488,
+            619542,
+            619558
+          ]
+        }
+      ],
+      "instructions": 900000,
+      "trace": "/home/blazevfx/Documents/projects/shakti/c-class-dual-issue/benchmarks/output/fpbench64/rtl.dump",
+      "window_lengths": [
+        300000,
+        300000,
+        300000
+      ]
+    }
+  },
+  "method": "trace-driven timing prediction; quad points have no RTL validation",
+  "model_dcache": false,
+  "warnings": [
+    "Score predicted-vs-measured deltas once quad RTL exists; aggregate baseline accuracy is not validation.",
+    "The forwarding topology and four-wide front end are proposals, not held-out validated mechanisms.",
+    "Frequency, area, power, I-cache misses, and physical register-file timing are not included in IPC.",
+    "Dhrystone and CoreMark are cache-resident integer workloads; fpbench is the only FP/capacity signal."
+  ]
+}
